@@ -84,10 +84,39 @@ async def test_post_turn_queues_durable_fact(stack):
         "topic_end": {"noul": 0.1},
     }
     post = await stack.service.post_turn(
-        bot_id="bot1", umo="umo1", user_text="我下周三去北京", assistant_text="好"
+        bot_id="bot1",
+        umo="umo1",
+        user_text="我下周三去北京",
+        assistant_text="好",
+        speaker_name="小明",
     )
     assert post.durable_fact == pytest.approx(0.9)
-    assert len(await stack.facts.pending("bot1")) == 1
+    pending = await stack.facts.pending("bot1")
+    assert len(pending) == 1
+    assert pending[0]["text"].startswith("小明: 我下周三去北京")
+
+
+async def test_post_turn_tension_fallback_names_the_other_party(stack):
+    now = 1_800_000_000_000
+    await _observe(stack, "那天你为什么先走", now)
+    stack.jev.ask_value = {
+        "salience": {"score": 3.0},
+        "conflict": {"noul": 0.9},
+        "durable_fact": {"noul": 0.1},
+        "topic_end": {"noul": 0.1},
+    }
+    stack.text.push("")
+    await stack.service.post_turn(
+        bot_id="bot1",
+        umo="umo1",
+        user_text="那天你为什么先走",
+        assistant_text="我不想说",
+        speaker_name="小明",
+    )
+    row = await stack.db.fetchone(
+        "SELECT text FROM persona_entries WHERE layer='tension' ORDER BY id DESC LIMIT 1"
+    )
+    assert "小明说的" in row["text"]
 
 
 async def test_post_turn_closes_topic(stack):

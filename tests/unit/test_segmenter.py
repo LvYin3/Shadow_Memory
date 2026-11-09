@@ -60,11 +60,50 @@ async def test_close_event_writes_fragment_entities_and_s0(stack):
     assert stack.text.tasks[-1] == "fragment"
 
 
-async def test_close_event_falls_back_to_last_user_message(stack):
+async def test_close_event_falls_back_to_attributed_user_message(stack):
     base = 1_700_000_000_000
     await _observe(stack, "这是一句会被截断的兜底碎片", base)
     result = await stack.segmenter.close_event(1, reason="test")
-    assert result["fragment"] == "这是一句会被截断的兜底碎片"
+    assert result["fragment"] == "小明说：这是一句会被截断的兜底碎片"
+
+
+async def test_close_event_prompt_forbids_user_events_as_self(stack):
+    from astrbot_plugin_shadow_memory.memory import prompts
+
+    assert "只有我说过、做过、感受到的事" in prompts.CLOSE_EVENT_SYSTEM
+    assert "对方说过、做过的事，必须用转录里的名字或昵称" in prompts.CLOSE_EVENT_SYSTEM
+    assert "共同经历用" in prompts.CLOSE_EVENT_SYSTEM
+
+
+async def test_rebuild_event_updates_text_and_preserves_dynamics(stack):
+    base = 1_700_000_000_000
+    await _observe(stack, "我爸妈支持我喜欢的东西", base)
+    stack.text.push({"fragment": "我爸妈支持我喜欢的东西", "entities": ["爸妈"]})
+    await stack.segmenter.close_event(1)
+    before = await stack.db.fetchone("SELECT * FROM events WHERE id=1")
+    stack.text.push({"fragment": "小明说爸妈支持他喜欢的东西", "entities": ["小明", "爸妈"]})
+    rebuilt = await stack.segmenter.rebuild_event(1, expected_bot_id="bot1")
+    after = await stack.db.fetchone("SELECT * FROM events WHERE id=1")
+    assert rebuilt["fragment"] == "小明说爸妈支持他喜欢的东西"
+    assert after["fragment"] == "小明说爸妈支持他喜欢的东西"
+    assert after["status"] == before["status"]
+    assert after["salience"] == before["salience"]
+    assert after["storage_strength"] == pytest.approx(before["storage_strength"])
+    assert after["retrievability"] == pytest.approx(before["retrievability"])
+
+
+async def test_rebuild_event_rejects_open_or_missing_turns(stack):
+    await _observe(stack, "还没结束", 1_700_000_000_000)
+    with pytest.raises(ValueError, match="只有已关闭"):
+        await stack.segmenter.rebuild_event(1, expected_bot_id="bot1")
+    await stack.db.execute(
+        "INSERT INTO events(id, bot_id, umo, kind, started_at, fragment, status, created_at) "
+        "VALUES(2,'bot1','umo1','episodic',1,'旧的','closed',1)"
+    )
+    with pytest.raises(ValueError, match="没有原始对话"):
+        await stack.segmenter.rebuild_event(2, expected_bot_id="bot1")
+    with pytest.raises(ValueError, match="不属于"):
+        await stack.segmenter.rebuild_event(1, expected_bot_id="bot2")
 
 
 async def test_empty_event_is_deleted(stack):

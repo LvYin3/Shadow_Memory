@@ -6,6 +6,13 @@ from astrbot_plugin_shadow_memory.core.types import Turn
 
 from .helpers import build_stack
 
+
+def test_facts_prompt_keeps_other_party_attribution():
+    from astrbot_plugin_shadow_memory.memory import prompts
+
+    assert "用候选里出现的名字或昵称指代对方" in prompts.FACTS_SYSTEM
+    assert "不要把对方的事写成“我”" in prompts.FACTS_SYSTEM
+
 DAY = 86_400_000
 
 

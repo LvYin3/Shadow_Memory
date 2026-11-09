@@ -300,6 +300,7 @@ class Main(Star):
             ("detail", self.web_detail, ["GET"], "memory detail"),
             ("settings", self.web_settings_get, ["GET"], "memory settings"),
             ("settings", self.web_settings_save, ["POST"], "save settings"),
+            ("event/rebuild", self.web_event_rebuild, ["POST"], "rebuild event"),
             ("transfer/preview", self.web_transfer_preview, ["POST"], "preview transfer"),
             ("transfer", self.web_transfer, ["POST"], "execute transfer"),
             ("export", self.web_export, ["GET"], "export memory"),
@@ -357,6 +358,23 @@ class Main(Star):
             return error_response("插件还没准备好", 503)
         try:
             return json_response(await self.webui.settings())
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_event_rebuild(self):
+        if not self._web_user():
+            return error_response("未登录", 401)
+        if self.webui is None:
+            return error_response("插件还没准备好", 503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", 400)
+        try:
+            event_id = int(payload.get("event_id") or 0)
+            result = await self.webui.rebuild_event(
+                str(payload.get("bot") or ""), event_id
+            )
+            return json_response(result)
         except Exception as exc:  # noqa: BLE001
             return self._web_error(exc)
 
@@ -1169,6 +1187,7 @@ class Main(Star):
                 umo=umo,
                 user_text=user_text,
                 assistant_text=assistant,
+                speaker_name=event.get_sender_name() or "",
             )
             if self.gate_svc is not None:
                 self.gate_svc.note_reply(bot_id, umo)

@@ -127,31 +127,34 @@ class Segmenter:
         return []
 
     # ------------------------------------------------------------------ 关闭
-    async def close_event(self, event_id: int, *, reason: str = "topic_end") -> dict[str, Any] | None:
-        event = await self.db.fetchone("SELECT * FROM events WHERE id=?", (event_id,))
-        if event is None or event.get("status") != "open":
-            return None
-        bot_id = str(event["bot_id"])
-        cfg = self.configs(bot_id)
-        turns = await self.db.fetchall(
-            "SELECT role, speaker_name, text, ts FROM event_turns WHERE event_id=? ORDER BY seq",
-            (event_id,),
-        )
-        if not turns:
-            await self.db.execute("DELETE FROM events WHERE id=?", (event_id,))
-            return None
+    @staticmethod
+    def _peer_name(turns: list[dict[str, Any]]) -> str:
+        for turn in reversed(turns):
+            if turn.get("role") == "user":
+                name = str(turn.get("speaker_name") or "").strip()
+                if name:
+                    return name[:12]
+        return "对方"
 
+    async def _generate_event_content(
+        self,
+        event: dict[str, Any],
+        turns: list[dict[str, Any]],
+        cfg: ConfigView,
+    ) -> dict[str, Any]:
+        bot_id = str(event["bot_id"])
         limit = cfg.int("memory.turn_context_turns", 30, lo=4, hi=200)
         transcript = self._transcript(turns[-limit:])
         big = (
             int(event.get("char_count") or 0) >= cfg.int("memory.big_event_chars", 20000)
             or int(event.get("turn_count") or 0) >= cfg.int("memory.big_event_turns", 80)
         )
-
         result = await self.textgen.generate_json(
             prompts.CLOSE_EVENT_SYSTEM,
             prompts.CLOSE_EVENT_USER.format(
-                turns=len(turns), chars=int(event.get("char_count") or 0), transcript=transcript
+                turns=len(turns),
+                chars=int(event.get("char_count") or 0),
+                transcript=transcript,
             ),
             bot_id=bot_id,
             umo=str(event.get("umo") or ""),
@@ -172,13 +175,46 @@ class Segmenter:
                 excerpts = [str(item)[:200] for item in raw_excerpts if str(item).strip()][:5]
 
         if not fragment:
+            name = self._peer_name(turns)
             last_user = next(
                 (str(turn["text"]) for turn in reversed(turns) if turn["role"] == "user"), ""
             )
-            fragment = (last_user or str(turns[-1]["text"]))[:60]
-            self.audit.warn("事件 %s 碎片生成失败，使用截断兜底", event_id)
+            if last_user:
+                prefix = f"{name}说："
+                fragment = prefix + last_user[: max(1, 60 - len(prefix))]
+            else:
+                fragment = f"{name}说了一些事"
+            self.audit.warn("事件 %s 碎片生成失败，使用归属兜底", event.get("id"))
         if big and not summary:
             summary = transcript[:300]
+        return {
+            "fragment": fragment,
+            "entities": entities,
+            "summary": summary,
+            "excerpts": excerpts,
+            "big": big,
+        }
+
+    async def close_event(self, event_id: int, *, reason: str = "topic_end") -> dict[str, Any] | None:
+        event = await self.db.fetchone("SELECT * FROM events WHERE id=?", (event_id,))
+        if event is None or event.get("status") != "open":
+            return None
+        bot_id = str(event["bot_id"])
+        cfg = self.configs(bot_id)
+        turns = await self.db.fetchall(
+            "SELECT role, speaker_name, text, ts FROM event_turns WHERE event_id=? ORDER BY seq",
+            (event_id,),
+        )
+        if not turns:
+            await self.db.execute("DELETE FROM events WHERE id=?", (event_id,))
+            return None
+
+        content = await self._generate_event_content(event, turns, cfg)
+        fragment = str(content["fragment"])
+        entities = list(content["entities"])
+        summary = str(content["summary"])
+        excerpts = list(content["excerpts"])
+        big = bool(content["big"])
 
         salience = int(event.get("salience") or 2)
         salience = min(5, max(1, salience))
@@ -224,6 +260,56 @@ class Segmenter:
             s0=round(strength, 3),
         )
         return {"event_id": event_id, "fragment": fragment, "entities": entities}
+
+    async def rebuild_event(
+        self, event_id: int, *, expected_bot_id: str = ""
+    ) -> dict[str, Any]:
+        """按原始 turns 重建一条已关闭事件的文本，保留 S/R 与状态。"""
+        event = await self.db.fetchone("SELECT * FROM events WHERE id=?", (event_id,))
+        if event is None:
+            raise ValueError("事件不存在")
+        bot_id = str(event["bot_id"])
+        if expected_bot_id and bot_id != expected_bot_id:
+            raise ValueError("事件不属于这个机器人")
+        if event.get("status") != "closed":
+            raise ValueError("只有已关闭的事件可以重建")
+        turns = await self.db.fetchall(
+            "SELECT role, speaker_name, text, ts FROM event_turns WHERE event_id=? ORDER BY seq",
+            (event_id,),
+        )
+        if not turns:
+            raise ValueError("这条事件没有原始对话，无法重建")
+        cfg = self.configs(bot_id)
+        content = await self._generate_event_content(event, turns, cfg)
+        fragment = str(content["fragment"])
+        summary = str(content["summary"])
+        entities = list(content["entities"])
+        excerpts = list(content["excerpts"])
+        old_fragment = str(event.get("fragment") or "")
+        await self.db.execute(
+            "UPDATE events SET fragment=?, summary=?, excerpts=?, entities=? WHERE id=?",
+            (
+                fragment,
+                summary or None,
+                json.dumps(excerpts, ensure_ascii=False) if excerpts else None,
+                json.dumps(entities, ensure_ascii=False),
+                event_id,
+            ),
+        )
+        self.audit.event(
+            "event_rebuilt",
+            bot_id=bot_id,
+            event_id=event_id,
+            old_chars=len(old_fragment),
+            new_chars=len(fragment),
+            entities=len(entities),
+        )
+        return {
+            "event_id": event_id,
+            "fragment": fragment,
+            "summary": summary,
+            "entities": entities,
+        }
 
     async def close_idle(self, now: int) -> int:
         rows = await self.db.fetchall(

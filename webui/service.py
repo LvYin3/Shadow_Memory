@@ -151,6 +151,15 @@ class WebUIService:
             )
         return {"bots": rows, "totals": totals}
 
+    async def rebuild_event(self, bot_id: str, event_id: int) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        if int(event_id) <= 0:
+            raise WebUIError("事件 ID 不合法")
+        try:
+            return await self.memory.rebuild_event(bot_id, int(event_id))
+        except ValueError as exc:
+            raise WebUIError(str(exc)) from exc
+
     async def detail(self, bot_id: str) -> dict[str, Any]:
         bot_id = self._require_bot_id(bot_id)
         return {
@@ -166,8 +175,10 @@ class WebUIService:
                 (bot_id,),
             ),
             "events": await self.db.fetchall(
-                "SELECT fragment, summary, salience, status, ended_at FROM events "
-                "WHERE bot_id=? AND merged_into IS NULL ORDER BY ended_at DESC LIMIT 20",
+                "SELECT e.id, e.fragment, e.summary, e.salience, e.status, e.ended_at, "
+                "EXISTS(SELECT 1 FROM event_turns t WHERE t.event_id=e.id) AS has_turns "
+                "FROM events e WHERE e.bot_id=? AND e.merged_into IS NULL "
+                "ORDER BY e.ended_at DESC LIMIT 20",
                 (bot_id,),
             ),
             "insights": await self.db.fetchall(

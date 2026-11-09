@@ -185,6 +185,27 @@ DeepSeek 事实（[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_
 
 实验依据：同一条“我爸妈支持我喜欢的东西”，放 system prompt 时模型归给自己；放 user 消息无标签时会被当成对方说的；带标签后能区分。把可变回忆直接搬进 system prompt 归属更强，但每次召回都会破坏 system 缓存，所以采用“固定说明 + 带标签的临时 user 块”。
 
+### 事件归属与重建
+
+事件入库时就区分主语，而不是等召回再猜：
+
+- 只有助手自己的行动/感受才写成“我…”；
+- 对方的事必须用转录里的名字/昵称，写成“小明说… / 小明…”；没有名字用“对方”；
+- 共同经历用“我和小明… / 我们…”；
+- 碎片生成失败时，兜底是 `小明说：<最后一条用户消息>`，不再直接复制对方原话；
+- 事实候选从 `对方: …` 改成 `小明: …`，事实提示词也要求用名字指代对方，不把对方的事写成“我”；
+- 张力兜底改成“我还没想明白小明说的：…”。
+
+WebUI 事件列表每条有“重建”按钮：
+
+- 只对 **已关闭且有 event_turns** 的事件可用；未关闭/无原始对话时禁用；
+- 点击后确认框显示旧 fragment/summary；
+- 只重写 `fragment / summary / excerpts / entities`，保留 `salience / S / R / status`；
+- 不重抽事实、不重抽张力、不重建边；
+- 旧数据不自动改，需要逐条确认重建；确定是错记忆也可以用 `/forget` 删除。
+
+接口：`POST /shadow_memory/event/rebuild`，请求 `{"bot": "...", "event_id": 123}`。新增路由和前端按钮需要重载插件后生效。
+
 ### 工具调用不生效（模型只回正文）
 
 AstrBot 在请求 provider 前有个过滤：如果对话模型的 `modalities` 是非空列表且**不含 `tool_use`**，会把整个 `tools` 清空（`tool_loop_agent_runner._func_tool_for_provider`）。插件 hook 里能看到 `tools:13`，但模型实际收到 0 个工具。
@@ -336,7 +357,7 @@ $env:PYTHONPATH=".pydeps"          # 仅本机脚手架的 pytest
 .venv\Scripts\python.exe -X utf8 -m pytest astrbot_plugin_shadow_memory/tests -q
 ```
 
-- `tests/unit/`：动力学、边、分段、人格、召回、记忆归属、审计日志、蒸馏、巩固、事实、衰减、seed、决策协议、判断 provider 适配与路由、固定上下文、交流环境、会话缓冲、TTS 绑定、转移、WebUI、发送、门控、备忘录、笔记、图片库、发图、视觉描述、QQ 空间、迁移；
+- `tests/unit/`：动力学、边、分段、事件归属与重建、人格、召回、记忆归属、审计日志、蒸馏、巩固、事实、衰减、seed、决策协议、判断 provider 适配与路由、固定上下文、交流环境、会话缓冲、TTS 绑定、转移、WebUI、发送、门控、备忘录、笔记、图片库、发图、视觉描述、QQ 空间、迁移；
 - `tests/integration/`：整条记忆链路、双机器人隔离、门控→分段、空间发布、seed 后继续生活；
 - `tests/contract/`：直接读 AstrBot 源码断言接口仍在（`ASTRBOT_SRC` 可覆盖路径），并用 `docstring_parser` 校验所有 LLM 工具的 schema；
 - `tests/live/smoke_models.py`：手动真实模型冒烟（读工作区 `.env`，不打印密钥）。
@@ -356,6 +377,7 @@ $env:PYTHONPATH=".pydeps"          # 仅本机脚手架的 pytest
 9. 图片库按机器人分目录；`qzone_media/` 根下的旧平铺文件不再可见，需要时手动移进 `<bot_id>/`。
 10. 走 AstrBot provider 时无法按用途区分思考强度（框架丢弃按调用参数）；只有直连 `text.base_url` 才能按 task 控制，否则用 provider 的 `custom_extra_body` 全局配。
 11. 走 AstrBot 判断 provider 时，超时与重试由 provider 自己控制；插件的 `decision.timeout_ms / protocol` 只作用于直连兜底。
+12. 事件没有 subject 字段，归属靠文本主语和昵称；重建只改 fragment/summary/excerpts/entities，不重建边、不重抽事实/张力；旧错事件需要 WebUI 逐条确认重建或 `/forget` 删除。
 12. 固定上下文只补 `session_messages` 里的最近消息；fallback 直发的最终文本、图片描述暂不写入缓冲。AstrBot 自带群聊上下文开启时插件让位。
 13. full v2 不含媒体文件；图片迁移用 WebUI「转移」。seed 导出保证可再导入，因此会截到 20 事件 / 50 事实。
 14. 媒体转移绕过目标图库 100 文件 / 200MB 配额，只受 100MB / 500 文件硬上限；完成后概览会标红。

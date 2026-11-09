@@ -207,6 +207,12 @@ button:disabled {
   cursor: not-allowed;
 }
 
+.rebuild-btn {
+  margin-left: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 .settings-list {
   display: flex;
   flex-direction: column;

@@ -206,6 +206,9 @@ def test_plugin_source_uses_expected_hooks():
         "recall_inject",
         "set_debug",
         "logging.debug",
+        "event/rebuild",
+        "web_event_rebuild",
+        "rebuild_event",
     ):
         assert snippet in main_text, snippet
     db_text = (PLUGIN / "core" / "db.py").read_text(encoding="utf-8")

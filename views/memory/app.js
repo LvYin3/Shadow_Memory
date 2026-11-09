@@ -101,7 +101,18 @@ function renderDetail(data) {
     </div>
     ${section("人格", data.persona, (row) => `<li><b>${esc(row.layer)}</b> ${esc(row.text)}</li>`)}
     ${section("事实", data.facts, (row) => `<li>${row.key_fact ? "★ " : ""}${esc(row.text)} <span class="muted">${esc(row.kind)}</span></li>`)}
-    ${section("事件", data.events, (row) => `<li>${esc(row.fragment)} <span class="muted">salience ${row.salience ?? "-"}</span></li>`)}
+    ${section(
+      "事件",
+      data.events,
+      (row) => {
+        const canRebuild = row.status === "closed" && Boolean(row.has_turns);
+        const title = row.status !== "closed" ? "未关闭的事件不能重建" : "没有原始对话，无法重建";
+        const button = canRebuild
+          ? `<button class="ghost rebuild-btn" data-rebuild="${row.id}">重建</button>`
+          : `<button class="ghost rebuild-btn" disabled title="${title}">重建</button>`;
+        return `<li>${esc(row.fragment || "（未生成）")} <span class="muted">salience ${row.salience ?? "-"}</span>${button}</li>`;
+      },
+    )}
     ${section("洞察", data.insights, (row) => `<li>${esc(row.text)}</li>`)}
     ${section("笔记", data.notes, (row) => `<li><b>${esc(row.title || row.kind)}</b> ${esc(row.body)}</li>`)}
     ${section("媒体", data.media, (row) => `<li>${esc(row.filename)} <span class="muted">${row.description || ""} · ${row.size} B</span></li>`)}
@@ -110,6 +121,28 @@ function renderDetail(data) {
   $("export-seed").onclick = () => exportBot(data.bot_id, "seed");
   $("open-import").onclick = () => openImport(data.bot_id);
   $("open-transfer").onclick = () => openTransfer(data.bot_id);
+  panel.querySelectorAll("[data-rebuild]").forEach((node) => {
+    node.addEventListener("click", () => rebuildEvent(data, node.dataset.rebuild));
+  });
+}
+
+async function rebuildEvent(data, eventId) {
+  const row = (data.events || []).find((item) => String(item.id) === String(eventId));
+  if (!row) return;
+  const oldFragment = row.fragment || "（空）";
+  const oldSummary = (row.summary || "（空）").slice(0, 240);
+  const ok = confirm(
+    `重建这条事件？\n\n旧碎片：${oldFragment}\n旧摘要：${oldSummary}\n\n` +
+      "会按原始对话重新生成文本，保留 salience / S / R / 状态。",
+  );
+  if (!ok) return;
+  try {
+    await apiPost("event/rebuild", { bot: data.bot_id, event_id: Number(eventId) });
+    toast("重建完成");
+    await selectBot(data.bot_id);
+  } catch (error) {
+    toast(error.message, true);
+  }
 }
 
 async function selectBot(botId) {

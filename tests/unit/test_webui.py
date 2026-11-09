@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from astrbot_plugin_shadow_memory.core.kv import KvStore
+from astrbot_plugin_shadow_memory.core.types import Turn
 from astrbot_plugin_shadow_memory.interaction.media import MediaService
 from astrbot_plugin_shadow_memory.interaction.media_dir import MediaDir
 from astrbot_plugin_shadow_memory.interaction.media_transfer import MediaTransfer
@@ -99,6 +100,36 @@ async def test_detail_limits(env):
     data = await env.ui.detail("bot1")
     assert set(data) >= {"persona", "facts", "events", "insights", "notes", "media"}
     assert len(data["persona"]) <= 20
+
+
+async def test_detail_events_expose_rebuild_metadata_and_rebuild(env):
+    await env.stack.service.observe(
+        Turn("bot1", "umo1", "user", "我爸妈支持我喜欢的东西", 1_700_000_000_000, "u1", "小明"),
+        display_name="测试群",
+        chat_type="group",
+    )
+    env.stack.text.push({"fragment": "我爸妈支持我喜欢的东西", "entities": ["爸妈"]})
+    await env.stack.segmenter.close_event(1)
+    data = await env.ui.detail("bot1")
+    event = data["events"][0]
+    assert event["id"] == 1
+    assert event["has_turns"] == 1
+    assert event["summary"] == "" or event["summary"] is None
+
+    env.stack.text.push({"fragment": "小明说爸妈支持他喜欢的东西", "entities": ["小明"]})
+    rebuilt = await env.ui.rebuild_event("bot1", 1)
+    assert rebuilt["fragment"] == "小明说爸妈支持他喜欢的东西"
+    with pytest.raises(WebUIError):
+        await env.ui.rebuild_event("bot2", 1)
+
+
+async def test_rebuild_event_rejects_event_without_turns(env):
+    await env.stack.db.execute(
+        "INSERT INTO events(id, bot_id, umo, kind, started_at, fragment, status, created_at) "
+        "VALUES(9,'bot1','umo1','episodic',1,'旧记忆','closed',1)"
+    )
+    with pytest.raises(WebUIError, match="没有原始对话"):
+        await env.ui.rebuild_event("bot1", 9)
 
 
 async def test_settings_save_and_clear(env):

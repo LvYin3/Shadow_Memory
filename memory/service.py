@@ -151,10 +151,12 @@ class MemoryService:
         umo: str,
         user_text: str,
         assistant_text: str,
+        speaker_name: str = "",
         now: int | None = None,
     ) -> PostTurn:
         stamp = now or self.now_fn()
         cfg = self.configs(bot_id)
+        peer_name = (speaker_name or "").strip()[:12] or "对方"
         output = PostTurn()
         if not cfg.bool("memory.enabled", True):
             return output
@@ -209,7 +211,9 @@ class MemoryService:
             )
 
         if output.conflict >= 0.6 and event is not None:
-            text = await self._draft_tension(bot_id, user_text, assistant_text)
+            text = await self._draft_tension(
+                bot_id, user_text, assistant_text, speaker_name=peer_name
+            )
             if text:
                 added = await self.persona.add_tension(
                     bot_id, text, [int(event["id"])], stamp
@@ -220,7 +224,7 @@ class MemoryService:
             await self.facts.enqueue(
                 bot_id,
                 umo,
-                f"对方: {(user_text or '')[:150]}\n我: {(assistant_text or '')[:150]}",
+                f"{peer_name}: {(user_text or '')[:150]}\n我: {(assistant_text or '')[:150]}",
                 output.salience,
                 stamp,
             )
@@ -230,14 +234,25 @@ class MemoryService:
         )
         return output
 
+    async def rebuild_event(self, bot_id: str, event_id: int) -> dict[str, Any]:
+        return await self.segmenter.rebuild_event(
+            event_id, expected_bot_id=bot_id
+        )
+
     async def _draft_tension(
-        self, bot_id: str, user_text: str, assistant_text: str
+        self,
+        bot_id: str,
+        user_text: str,
+        assistant_text: str,
+        *,
+        speaker_name: str = "",
     ) -> str | None:
+        name = (speaker_name or "").strip()[:12] or "对方"
         system = (
             "你是一个人的内心整理器。这段对话留下了一个没想明白的结，请用第一人称写一句"
             "不超过 70 字的话，说明你此刻心里悬着什么。只输出这句话。"
         )
-        user = f"对方: {user_text[:200]}\n我: {assistant_text[:200]}"
+        user = f"{name}: {user_text[:200]}\n我: {assistant_text[:200]}"
         draft = await self.textgen.generate(system, user, bot_id=bot_id, task="tension")
         text = (draft or "").strip().strip("「」\"'").split("\n")[0]
         if 4 <= len(text) <= 90:
@@ -245,7 +260,7 @@ class MemoryService:
         fallback = (user_text or assistant_text or "").strip()
         if not fallback:
             return None
-        return f"我还没想明白：{fallback[:50]}"
+        return f"我还没想明白{name}说的：{fallback[:40]}"[:90]
 
     # ------------------------------------------------------------------ 作业
     async def distill(self, bot_id: str, reason: str = "manual") -> Any:
