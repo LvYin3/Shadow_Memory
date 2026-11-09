@@ -1,0 +1,7 @@
+name: shadow_memory
+desc: 影忆 ShadowMemory —— 自迭代人格记忆、隐性回忆、群聊门控、分段回复、语音、笔记、备忘录与 QQ 空间
+author: LvYin3
+version: 1.0.0
+display_name: 影忆
+short_desc: 影忆：自迭代人格记忆与拟人交互
+astrbot_version: ">=4.29.3"

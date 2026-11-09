@@ -1,0 +1,13 @@
+{
+  "metadata": {
+    "display_name": "影忆",
+    "short_desc": "影忆：自迭代人格记忆与拟人交互",
+    "desc": "影忆 ShadowMemory：事件记忆、S/R 遗忘曲线、关联边、夜间巩固、事实有效期、人格蒸馏，以及群聊门控、分段回复、语音、笔记、备忘录与 QQ 空间。"
+  },
+  "views": {
+    "memory": {
+      "title": "记忆总览",
+      "description": "查看各机器人记忆状态、转移记忆、导入导出 full/seed，并配置 TTS 与固定上下文。"
+    }
+  }
+}

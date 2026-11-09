@@ -1,0 +1,328 @@
+{
+  "decision": {
+    "type": "object",
+    "description": "System One 判断模型（可选：AstrBot 判断 provider 或 OpenAI 兼容直连）",
+    "items": {
+      "provider_id": {
+        "type": "string",
+        "description": "优先使用 AstrBot 已配置的 System One 判断 provider；填它的 ID，留空则用下面的直连配置",
+        "hint": "在 AstrBot「模型提供商 → 判断」里查看 ID。AstrBot 的提供商下拉只列对话模型，所以这里需要手动填写",
+        "default": ""
+      },
+      "base_url": {
+        "type": "string",
+        "description": "判断模型站点。填 OpenAI 风格的 /v1 地址或站点根地址均可；留空则只用 AstrBot provider",
+        "hint": "例：https://your-endpoint.example/v1",
+        "default": ""
+      },
+      "api_key": {
+        "type": "string",
+        "description": "判断模型 API Key",
+        "secret": true,
+        "default": ""
+      },
+      "model": {
+        "type": "string",
+        "description": "判断模型 ID（直连时必填）",
+        "default": ""
+      },
+      "protocol": {
+        "type": "string",
+        "description": "协议：auto 先试原生 /v1/systemone，失败退回 chat/completions",
+        "options": ["auto", "systemone", "chat"],
+        "default": "auto"
+      },
+      "timeout_ms": {
+        "type": "int",
+        "description": "单次判断超时（毫秒）。建议 3000ms 起，按端点延迟调整",
+        "default": 3000,
+        "slider": {"min": 200, "max": 15000, "step": 100}
+      },
+      "max_retries": {
+        "type": "int",
+        "description": "失败重试次数",
+        "default": 1,
+        "slider": {"min": 0, "max": 3, "step": 1}
+      }
+    }
+  },
+  "text": {
+    "type": "object",
+    "description": "写作用模型（碎片 / gist / 摘要 / 蒸馏 / 事实抽取）",
+    "items": {
+      "provider_id": {
+        "type": "string",
+        "description": "使用 AstrBot 已配置的对话模型提供商（留空则用当前会话默认）",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "base_url": {
+        "type": "string",
+        "description": "直连兜底：OpenAI 兼容地址（provider_id 为空且此项填写时使用）",
+        "hint": "例：https://api.deepseek.com/v1",
+        "default": ""
+      },
+      "api_key": {
+        "type": "string",
+        "description": "直连兜底 API Key",
+        "secret": true,
+        "default": ""
+      },
+      "model": {
+        "type": "string",
+        "description": "直连兜底模型名",
+        "default": "deepseek-chat"
+      },
+      "temperature": {
+        "type": "float",
+        "description": "生成温度",
+        "default": 0.4,
+        "slider": {"min": 0, "max": 1.5, "step": 0.1}
+      },
+      "max_tokens": {
+        "type": "int",
+        "description": "单次生成上限",
+        "default": 1200
+      },
+      "thinking": {
+        "type": "string",
+        "description": "文本生成的思考模式（直连时生效）：auto 不传 / enabled / disabled",
+        "options": ["auto", "enabled", "disabled"],
+        "default": "auto"
+      },
+      "reasoning_effort": {
+        "type": "string",
+        "description": "思考强度：low / high / max；空则用端点默认（DeepSeek 默认 high）",
+        "default": ""
+      },
+      "thinking_by_task": {
+        "type": "dict",
+        "description": "按用途覆盖思考模式：fragment / tension / facts / distill / consolidate；空字符串跟随 text.thinking",
+        "default": {
+          "fragment": "disabled",
+          "tension": "disabled",
+          "facts": "disabled",
+          "distill": "enabled",
+          "consolidate": "enabled"
+        }
+      }
+    }
+  },
+  "vision": {
+    "type": "object",
+    "description": "视觉描述：存图时自动补一句（主模型看不到图时使用）",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用自动图片描述", "default": true},
+      "provider_id": {
+        "type": "string",
+        "description": "视觉模型提供商；空则用 AstrBot 的图像打标 provider，再空用写作模型",
+        "default": "",
+        "_special": "select_provider"
+      },
+      "model": {
+        "type": "string",
+        "description": "直连时使用的视觉模型（provider 路径用 provider 自己的模型）",
+        "default": "deepseek-flash"
+      },
+      "prompt": {
+        "type": "text",
+        "description": "描述提示词",
+        "default": "用一句不超过 60 字的中文，客观描述这张图里有什么；不要猜测背景故事，不要加评论。"
+      },
+      "timeout_s": {"type": "int", "description": "视觉调用超时（秒）", "default": 20},
+      "max_chars": {"type": "int", "description": "描述长度上限", "default": 80},
+      "max_tokens": {"type": "int", "description": "视觉调用输出上限（思考模型需要余量）", "default": 800},
+      "disable_thinking": {"type": "bool", "description": "直连时请求关闭思考；端点不支持会自动重试", "default": true}
+    }
+  },
+  "context": {
+    "type": "object",
+    "description": "固定聊天上下文：每次请求带上该会话最近 N 条消息",
+    "items": {
+      "recent_messages": {
+        "type": "int",
+        "description": "最近 N 条消息（0 关闭；按 bot 可在 WebUI 覆盖）",
+        "default": 20
+      },
+      "max_chars": {
+        "type": "int",
+        "description": "注入内容的总字符上限",
+        "default": 2000
+      }
+    }
+  },
+  "memory": {
+    "type": "object",
+    "description": "情景记忆",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用记忆模块", "default": true},
+      "idle_split_minutes": {"type": "int", "description": "空闲切会话（分钟）", "default": 30},
+      "topic_end_threshold": {"type": "float", "description": "话题结束阈值", "default": 0.7},
+      "big_event_chars": {"type": "int", "description": "大事件字数阈值（触发摘要/摘录）", "default": 20000},
+      "big_event_turns": {"type": "int", "description": "大事件轮数阈值", "default": 80},
+      "sweeper_seconds": {"type": "int", "description": "空闲事件巡检间隔（秒）", "default": 300},
+      "turn_context_turns": {"type": "int", "description": "写碎片时使用的最近轮数", "default": 30}
+    }
+  },
+  "dynamics": {
+    "type": "object",
+    "description": "S/R 记忆动力学",
+    "items": {
+      "s_decay": {"type": "float", "description": "S 每日衰减乘数", "default": 0.999},
+      "r_floor": {"type": "float", "description": "检索资格线", "default": 0.2},
+      "recall_gain": {"type": "float", "description": "召回增长系数", "default": 2.0},
+      "gain_cap": {"type": "float", "description": "单次 S 增长上限倍率", "default": 1.5},
+      "archive_s": {"type": "float", "description": "归档线（天）", "default": 1.0}
+    }
+  },
+  "edges": {
+    "type": "object",
+    "description": "关联边",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用实体建边", "default": true},
+      "max_degree": {"type": "int", "description": "单事件度数上限", "default": 20},
+      "neighbors": {"type": "int", "description": "召回时的一跳邻居数", "default": 4}
+    }
+  },
+  "recall": {
+    "type": "object",
+    "description": "召回",
+    "items": {
+      "max_candidates": {"type": "int", "description": "候选上限", "default": 12},
+      "theta_pre": {"type": "float", "description": "主句注入阈值", "default": 0.4},
+      "theta_aux": {"type": "float", "description": "辅句注入阈值", "default": 0.35},
+      "cooldown_turns": {"type": "int", "description": "同一记忆冷却轮数", "default": 10},
+      "no_inject_last_turns": {"type": "int", "description": "最近 N 轮注入过则不再注入", "default": 3},
+      "max_inject_chars": {"type": "int", "description": "单条注入字数上限", "default": 40}
+    }
+  },
+  "consolidation": {
+    "type": "object",
+    "description": "夜间巩固",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用夜间巩固", "default": true},
+      "cron": {"type": "string", "description": "巩固 cron（5 段：分 时 日 月 周）", "default": "30 3 * * *"},
+      "max_clusters": {"type": "int", "description": "每晚最多簇数", "default": 5},
+      "min_events": {"type": "int", "description": "成簇最少事件数", "default": 3},
+      "min_entities": {"type": "int", "description": "成簇最少共享实体数", "default": 2},
+      "window_days": {"type": "int", "description": "簇内时间跨度（天）", "default": 30},
+      "lookback_days": {"type": "int", "description": "候选回看（天）", "default": 90},
+      "max_events_per_cluster": {"type": "int", "description": "每簇最多事件数", "default": 5}
+    }
+  },
+  "insights": {
+    "type": "object",
+    "description": "洞察",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用洞察", "default": true},
+      "max_per_night": {"type": "int", "description": "每晚最多洞察条数", "default": 2}
+    }
+  },
+  "persona": {
+    "type": "object",
+    "description": "人格记忆",
+    "items": {
+      "mode": {
+        "type": "string",
+        "description": "append：AstrBot persona 作基底，插件追加人格块；plugin_only：插件用 base_card + 人格块",
+        "options": ["append", "plugin_only"],
+        "default": "append"
+      },
+      "base_card": {"type": "text", "description": "plugin_only 模式下的基底卡（“她天生是谁”）", "default": ""},
+      "max_chars": {"type": "int", "description": "人格块基准字数", "default": 1000},
+      "warn_chars": {"type": "int", "description": "预警字数", "default": 1300},
+      "hard_chars": {"type": "int", "description": "硬线字数", "default": 1600},
+      "quota_core": {"type": "int", "description": "核心倾向条数", "default": 6},
+      "quota_edge": {"type": "int", "description": "边缘态度条数", "default": 7},
+      "quota_tension": {"type": "int", "description": "未消解张力条数", "default": 3},
+      "distill_days": {"type": "int", "description": "蒸馏周期（天）", "default": 7},
+      "distill_events": {"type": "int", "description": "蒸馏候选事件数阈值", "default": 20},
+      "entry_min_chars": {"type": "int", "description": "条目最少字数", "default": 50},
+      "entry_max_chars": {"type": "int", "description": "条目最多字数", "default": 70},
+      "max_ops": {"type": "int", "description": "单次蒸馏最多操作数", "default": 3},
+      "max_deletes": {"type": "int", "description": "单次蒸馏最多删除数", "default": 1},
+      "snapshot_keep": {"type": "int", "description": "保留人格快照数", "default": 20}
+    }
+  },
+  "interaction": {
+    "type": "object",
+    "description": "拟人交互",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用交互模块（门控/分段/语音）", "default": true},
+      "gate_enabled": {"type": "bool", "description": "群聊门控", "default": true},
+      "gate_threshold": {"type": "float", "description": "reply_now 阈值", "default": 0.5},
+      "gate_history": {"type": "int", "description": "门控参考的最近消息数", "default": 10},
+      "max_segments": {"type": "int", "description": "每轮最多分段", "default": 3},
+      "speak_max_chars": {"type": "int", "description": "语音单条字数上限", "default": 60},
+      "fallback_send_final_text": {"type": "bool", "description": "强制输出：没调用 say 时也发送最终文本（默认关，关闭时不发送）", "default": false},
+      "environment": {
+        "type": "object",
+        "description": "交流环境与工具使用提示词（第一人称）",
+        "items": {
+          "enabled": {"type": "bool", "description": "启用交流环境提示词", "default": true},
+          "prompt": {"type": "text", "description": "自定义规则（留空使用内置默认）；请用第一人称写，平台/群聊/昵称会自动拼在前面", "default": ""}
+        }
+      },
+      "say_example": {"type": "bool", "description": "在上下文末尾注入一条临时 say 工具调用示例，覆盖纯文本 assistant 先例（默认开）", "default": true},
+      "tts_provider_ids": {"type": "dict", "description": "按机器人绑定 TTS 提供商：{bot_id: provider_id}", "default": {}},
+      "media": {
+        "type": "object",
+        "description": "本地图片库",
+        "items": {
+          "enabled": {"type": "bool", "description": "启用 media 工具（存图/查图/删图）", "default": true},
+          "dir": {"type": "string", "description": "图片库根目录（相对插件数据目录），实际落在 <dir>/<bot_id>/", "default": "qzone_media"},
+          "max_files": {"type": "int", "description": "每机器人图片数上限", "default": 100},
+          "max_total_mb": {"type": "int", "description": "每机器人总容量上限（MB）", "default": 200},
+          "max_image_mb": {"type": "int", "description": "单张图片体积上限（MB）", "default": 5},
+          "allow_event_images": {"type": "bool", "description": "允许引用当前消息里的图片", "default": true},
+          "download_timeout_s": {"type": "int", "description": "URL 下载超时（秒）", "default": 10},
+          "max_redirects": {"type": "int", "description": "URL 重定向上限", "default": 3},
+          "max_name_chars": {"type": "int", "description": "文件名前缀长度上限", "default": 32},
+          "max_description_chars": {"type": "int", "description": "图片描述长度上限", "default": 200}
+        }
+      },
+      "send_image": {
+        "type": "object",
+        "description": "在会话里发图片",
+        "items": {
+          "enabled": {"type": "bool", "description": "启用 send_image 工具", "default": true},
+          "max_per_turn": {"type": "int", "description": "每轮最多发几张图（不占 3 段文字预算）", "default": 2},
+          "max_caption_chars": {"type": "int", "description": "配文长度上限", "default": 200}
+        }
+      },
+      "qzone": {
+        "type": "object",
+        "description": "QQ 空间",
+        "items": {
+          "enabled": {"type": "bool", "description": "启用发说说", "default": true},
+          "action": {"type": "string", "description": "OneBot 动作名（NapCat 系为 send_qzone_msg）", "default": "send_qzone_msg"},
+          "ugc_right": {"type": "int", "description": "可见范围：1 所有人 / 4 好友 / 64 仅自己", "default": 1},
+          "daily_limit": {"type": "int", "description": "每机器人每日软上限", "default": 3},
+          "max_images": {"type": "int", "description": "单条说说最多图片数", "default": 9}
+        }
+      }
+    }
+  },
+  "memo": {
+    "type": "object",
+    "description": "备忘录",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用备忘录", "default": true},
+      "catalog_days": {"type": "int", "description": "会话目录回看天数", "default": 7},
+      "catalog_limit": {"type": "int", "description": "会话目录条数上限", "default": 10}
+    }
+  },
+  "logging": {
+    "type": "object",
+    "description": "日志与审计",
+    "items": {
+      "retention_days": {"type": "int", "description": "各类日志保留天数", "default": 90},
+      "debug": {"type": "bool", "description": "Debug 日志开关（默认关；打开后输出 persona_inject / recall_inject 等诊断）", "default": false}
+    }
+  },
+  "bot_overrides": {
+    "type": "dict",
+    "description": "按机器人覆盖（键为 bot_id）。可覆盖：persona_mode / base_card / gate_enabled / gate_threshold / theta_pre / theta_aux / tts_provider_id / environment_enabled / environment_prompt / qzone_daily_limit / qzone_ugc_right",
+    "default": {}
+  }
+}

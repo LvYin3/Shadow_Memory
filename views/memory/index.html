@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>影忆 · 记忆总览</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>影忆 · 记忆总览</h1>
+        <p class="sub">人格、事实、事件、洞察、笔记与图片，一处查看与迁移。</p>
+      </div>
+      <div class="top-actions">
+        <button id="refresh" class="ghost">刷新</button>
+      </div>
+    </header>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="overview">概览</button>
+      <button class="tab" data-tab="settings">设置</button>
+    </nav>
+
+    <main>
+      <section id="panel-overview" class="panel">
+        <div id="bot-list" class="bot-list"></div>
+        <div id="detail" class="detail">
+          <p class="muted">点左边任意机器人查看明细。</p>
+        </div>
+      </section>
+
+      <section id="panel-settings" class="panel hidden">
+        <div class="settings-head">
+          <h2>TTS 与固定上下文</h2>
+          <p class="muted">TTS 未显式绑定为静音；上下文 0 表示关闭，留空跟随全局。</p>
+        </div>
+        <div id="settings-list" class="settings-list"></div>
+      </section>
+    </main>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <dialog id="transfer-dialog">
+      <form method="dialog" class="dialog-body">
+        <h2>转移记忆</h2>
+        <label>目标机器人
+          <select id="transfer-target"></select>
+        </label>
+        <fieldset>
+          <legend>模式</legend>
+          <label><input type="radio" name="mode" value="merge" checked /> 合并（去重追加）</label>
+          <label><input type="radio" name="mode" value="replace" /> 覆盖（清空目标选中类别）</label>
+        </fieldset>
+        <fieldset>
+          <legend>类别</legend>
+          <div id="category-boxes" class="checks"></div>
+        </fieldset>
+        <div class="row">
+          <button type="button" id="preview-btn" class="ghost">预览</button>
+          <span id="preview-result" class="muted"></span>
+        </div>
+        <label id="confirm-wrap" class="hidden">覆盖确认：输入目标 bot_id
+          <input id="confirm-target" type="text" autocomplete="off" />
+        </label>
+        <div class="dialog-actions">
+          <button type="button" id="transfer-cancel" class="ghost">取消</button>
+          <button type="button" id="transfer-run" class="danger">执行转移</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="import-dialog">
+      <form method="dialog" class="dialog-body">
+        <h2>导入记忆</h2>
+        <label>目标机器人
+          <select id="import-target"></select>
+        </label>
+        <label>JSON 文件（≤10MB）
+          <input id="import-file" type="file" accept="application/json,.json" />
+        </label>
+        <label class="check"><input id="import-force" type="checkbox" /> 覆盖目标已有记忆（自动备份）</label>
+        <div class="dialog-actions">
+          <button type="button" id="import-cancel" class="ghost">取消</button>
+          <button type="button" id="import-run">导入</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
