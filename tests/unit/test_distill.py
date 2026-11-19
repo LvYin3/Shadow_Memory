@@ -5,6 +5,7 @@ import pytest
 from .helpers import build_stack, text_of_len
 
 DAY = 86_400_000
+NOW = 1_800_000_000_000
 
 
 @pytest.fixture
@@ -51,6 +52,25 @@ async def test_due_after_twenty_gists(stack):
 async def test_no_sources_skips(stack):
     result = await stack.service.distill("bot1", "manual")
     assert result.skipped == "no_sources"
+    log = await stack.db.fetchone(
+        "SELECT reason FROM distill_logs WHERE bot_id='bot1' ORDER BY id DESC LIMIT 1"
+    )
+    assert log["reason"] == "no_sources"
+
+
+async def test_text_unavailable_failure_backs_off(stack):
+    await _event(stack.db, kind="gist", created=DAY)
+    result = await stack.distiller.run("bot1", now=NOW)
+    assert result.skipped == "text_unavailable"
+    log = await stack.db.fetchone(
+        "SELECT reason, created_at FROM distill_logs WHERE bot_id='bot1' ORDER BY id DESC LIMIT 1"
+    )
+    assert log["reason"] == "text_unavailable"
+    due, reason = await stack.distiller.due("bot1", NOW + 60_000)
+    assert due is False
+    assert reason == "retry_backoff"
+    due, _ = await stack.distiller.due("bot1", NOW + 361 * 60_000)
+    assert due is True
 
 
 async def test_text_unavailable_skips(stack):

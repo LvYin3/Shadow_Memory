@@ -4,7 +4,8 @@ from __future__ import annotations
 
 DEFAULT_RULES = (
     "- 我说文字消息必须调用 say 函数（say(text)）；不调用 say，我写的话就发不出去。\n"
-    "- 比如对方说“在吗”，我就调 say(text=\"在吗\")，不写正文。"
+    "- 比如对方说“在吗”，我就调 say(text=\"在吗\")，不写正文。\n"
+    "- say/speak 的 text 只放正文，不要输出 <text> 或任何 XML/HTML 标签。"
 )
 
 
@@ -69,6 +70,7 @@ def build_environment_prompt(
 
     if compact:
         lines.append("- 我说文字消息必须调用 say 函数；比如对方说“在吗”，我就调 say(text=\"在吗\")。")
+        lines.append("- say/speak 的 text 只放正文，不要输出 <text> 或任何 XML/HTML 标签。")
         return "\n".join(lines)
 
     body = (rules or "").strip() or DEFAULT_RULES

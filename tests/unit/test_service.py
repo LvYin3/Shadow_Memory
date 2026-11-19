@@ -55,6 +55,24 @@ async def test_post_turn_defaults_when_judge_fails(stack):
     assert post.closed is False
 
 
+async def test_post_turn_receives_full_conversation_context(stack):
+    stack.jev.ask_value = {
+        "salience": {"score": 3.0},
+        "conflict": {"noul": 0.1},
+        "durable_fact": {"noul": 0.1},
+        "topic_end": {"noul": 0.1},
+    }
+    conversation = {"messages": [{"role": "user", "content": "之前"}]}
+    await stack.service.post_turn(
+        bot_id="bot1",
+        umo="umo1",
+        user_text="现在",
+        assistant_text="好的",
+        decision_context=conversation,
+    )
+    assert stack.jev.states[-1]["conversation"] == conversation
+
+
 async def test_post_turn_adds_tension_on_conflict(stack):
     now = 1_800_000_000_000
     await _observe(stack, "那天你为什么先走", now)

@@ -22,6 +22,18 @@ async def test_gate_passes_high_probability(stack):
     assert rows[0]["decision"] == "reply"
 
 
+async def test_gate_receives_full_conversation_context(stack):
+    conversation = {"messages": [{"role": "user", "content": "之前的话"}]}
+    await stack.gate.judge(
+        bot_id="bot1",
+        umo="umo1",
+        message="现在的话",
+        sender_name="小明",
+        conversation=conversation,
+    )
+    assert stack.jev.states[-1]["conversation"] == conversation
+
+
 async def test_gate_stays_silent_below_threshold(stack):
     stack.jev.noul_value = 0.2
     decision = await stack.gate.judge(

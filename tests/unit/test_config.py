@@ -14,6 +14,17 @@ def test_defaults_are_complete():
     assert cfg.str("interaction.environment.prompt") == ""
     assert cfg.bool("interaction.say_example") is True
     assert cfg.bool("logging.debug") is False
+    assert cfg.bool("ambient.enabled") is True
+    assert cfg.int("ambient.recent_days") == 7
+    assert cfg.int("ambient.recent_limit") == 5
+    assert cfg.float("ambient.promote_threshold") == 0.75
+    assert cfg.int("ambient.min_salience") == 3
+    assert cfg.bool("recall.skip_smalltalk") is True
+    assert cfg.int("recall.min_query_chars") == 2
+    assert cfg.int("persona.distill_retry_minutes") == 360
+    assert cfg.int("persona.distill_check_seconds") == 300
+    assert cfg.bool("decision.full_context") is True
+    assert cfg.int("decision.full_context_max_chars") == 16000
     assert cfg.int("persona.quota_core") == 6
 
 

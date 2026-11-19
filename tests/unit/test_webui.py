@@ -68,6 +68,7 @@ def env(db, make_configs, workdir):
         db,
         configs,
         stack.service,
+        stack.ambient,
         media,
         transfer,
         kv,
@@ -98,7 +99,8 @@ async def test_overview_includes_data_and_kv_bots(env):
 async def test_detail_limits(env):
     await env.stack.seed.import_seed("bot1", seed_payload(), force=True)
     data = await env.ui.detail("bot1")
-    assert set(data) >= {"persona", "facts", "events", "insights", "notes", "media"}
+    assert set(data) >= {"ambient", "persona", "facts", "events", "insights", "notes", "media"}
+    assert set(data["ambient"]) >= {"text", "recent", "people", "important"}
     assert len(data["persona"]) <= 20
 
 

@@ -25,6 +25,7 @@ class Segmenter:
         edges: EdgeRepo,
         textgen: Any,
         audit: Audit,
+        on_closed: Callable[[dict[str, Any]], Any] | None = None,
     ) -> None:
         self.db = db
         self.configs = configs
@@ -32,6 +33,7 @@ class Segmenter:
         self.edges = edges
         self.textgen = textgen
         self.audit = audit
+        self.on_closed = on_closed
 
     # ------------------------------------------------------------------ 观察
     async def observe(
@@ -202,7 +204,7 @@ class Segmenter:
         bot_id = str(event["bot_id"])
         cfg = self.configs(bot_id)
         turns = await self.db.fetchall(
-            "SELECT role, speaker_name, text, ts FROM event_turns WHERE event_id=? ORDER BY seq",
+            "SELECT role, speaker_id, speaker_name, text, ts FROM event_turns WHERE event_id=? ORDER BY seq",
             (event_id,),
         )
         if not turns:
@@ -259,6 +261,19 @@ class Segmenter:
             salience=salience,
             s0=round(strength, 3),
         )
+        if self.on_closed is not None:
+            try:
+                await self.on_closed({
+                    "event_id": event_id,
+                    "bot_id": bot_id,
+                    "turns": turns,
+                    "fragment": fragment,
+                    "summary": summary,
+                    "salience": salience,
+                    "now": now,
+                })
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("事件关闭回调失败：%s", exc)
         return {"event_id": event_id, "fragment": fragment, "entities": entities}
 
     async def rebuild_event(

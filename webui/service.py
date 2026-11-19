@@ -12,6 +12,7 @@ from ..core.config import ConfigView
 from ..core.db import Database
 from ..core.kv import KvStore
 from ..interaction.media import MediaService
+from ..memory.ambient import AmbientService
 from ..memory.seed import SeedError
 from ..memory.service import MemoryService
 from ..memory.transfer import TransferService
@@ -33,6 +34,7 @@ class WebUIService:
         db: Database,
         configs: Callable[[str], ConfigView],
         memory: MemoryService,
+        ambient: AmbientService,
         media: MediaService,
         transfer: TransferService,
         kv: KvStore,
@@ -45,6 +47,7 @@ class WebUIService:
         self.db = db
         self.configs = configs
         self.memory = memory
+        self.ambient = ambient
         self.media = media
         self.transfer = transfer
         self.kv = kv
@@ -162,8 +165,15 @@ class WebUIService:
 
     async def detail(self, bot_id: str) -> dict[str, Any]:
         bot_id = self._require_bot_id(bot_id)
+        ambient = await self.ambient.snapshot(bot_id)
         return {
             "bot_id": bot_id,
+            "ambient": {
+                "text": ambient.text,
+                "recent": ambient.recent,
+                "people": ambient.people,
+                "important": ambient.important,
+            },
             "persona": await self.db.fetchall(
                 "SELECT layer, text FROM persona_entries WHERE bot_id=? AND active=1 "
                 "ORDER BY layer, id LIMIT 20",

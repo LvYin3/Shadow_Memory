@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+import tempfile
+import wave
+from pathlib import Path
+
 import pytest
 
 from astrbot_plugin_shadow_memory.core.audit import Audit
@@ -53,6 +58,28 @@ async def test_say_rejects_empty(sender):
     assert event.sent == []
 
 
+async def test_say_cleans_trailing_text_tag(sender):
+    event = FakeEvent()
+    result = await sender.say(event, bot_id="bot1", text="你好</text>")
+    assert result == "已说"
+    assert event.sent[0].chain[0].text == "你好"
+
+
+async def test_say_after_cleaning_empty_does_not_send(sender):
+    event = FakeEvent()
+    result = await sender.say(event, bot_id="bot1", text="</text>")
+    assert "没说出口" in result
+    assert event.sent == []
+
+
+async def test_speak_cleans_trailing_text_tag(sender):
+    event = FakeEvent()
+    result = await sender.speak(event, bot_id="bot1", umo="umo1", text="你好</text>")
+    assert result == "已说（语音）"
+    state = state_of(event)
+    assert state.spoken_texts == ["你好"]
+
+
 async def test_speak_length_limit(sender):
     event = FakeEvent()
     result = await sender.speak(event, bot_id="bot1", umo="umo1", text="字" * 61)
@@ -64,6 +91,62 @@ async def test_speak_only_once_per_turn(sender):
     event = FakeEvent()
     assert await sender.speak(event, bot_id="bot1", umo="umo1", text="你好呀") == "已说（语音）"
     assert "已经用声音" in await sender.speak(event, bot_id="bot1", umo="umo1", text="再说一句")
+
+
+async def _voice_wav() -> Path:
+    fd, name = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    path = Path(name)
+    samples = [1000, -1000] * 3200
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(32000)
+        wav.writeframes(bytes().join(
+            int(sample).to_bytes(2, "little", signed=True) for sample in samples
+        ))
+    return path
+
+
+async def test_speak_official_normalizes_before_send(sender):
+    source = await _voice_wav()
+
+    async def precheck(path):
+        assert path.exists()
+        return True, ""
+
+    sender._silk_precheck = precheck
+    sender.tts["provider"] = FakeTTS(path=str(source))
+    event = FakeEvent(platform_name="qq_official", message_type="FriendMessage", group=False)
+    try:
+        result = await sender.speak(event, bot_id="bot1", umo="umo1", text="你好呀")
+        assert result == "已说（语音）"
+        assert state_of(event).sent is True
+        assert len(event.sent) == 1
+        sent_path = event.sent[0].chain[0].text
+        assert sent_path != str(source)
+        assert not Path(sent_path).exists()
+    finally:
+        source.unlink(missing_ok=True)
+
+
+async def test_speak_official_precheck_failure_does_not_fallback(sender):
+    source = await _voice_wav()
+
+    async def precheck(path):
+        return False, "silk failed"
+
+    sender._silk_precheck = precheck
+    sender.tts["provider"] = FakeTTS(path=str(source))
+    event = FakeEvent(platform_name="qq_official", message_type="FriendMessage", group=False)
+    try:
+        result = await sender.speak(event, bot_id="bot1", umo="umo1", text="你好呀")
+        assert "转换失败" in result
+        assert state_of(event).sent is False
+        assert state_of(event).texts == []
+        assert event.sent == []
+    finally:
+        source.unlink(missing_ok=True)
 
 
 async def test_speak_falls_back_to_text_without_tts(sender):

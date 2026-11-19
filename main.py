@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,11 @@ from .interaction.context_inject import (
     trim_to_chars,
     without_current,
 )
+from .interaction.decision_context import (
+    build_conversation,
+    context_for_gate,
+    context_with_response,
+)
 from .interaction.environment import build_environment_prompt, say_example_messages
 from .interaction.gate import Gate
 from .interaction.commands import command_args
@@ -54,7 +60,9 @@ from .interaction.result import should_drop_final_text
 from .interaction.sender import Sender, state_of
 from .interaction.session_buffer import SessionBuffer
 from .interaction.sessions import SessionCatalog
+from .interaction.text_clean import clean_text_tag
 from .interaction.tts_binding import resolve_tts_provider_id
+from .memory.ambient import AmbientService
 from .memory.consolidate import Consolidator
 from .memory.decay import Decayer
 from .memory.distill import Distiller
@@ -76,6 +84,10 @@ LLM_TEXT_KEY = "shadow_memory_llm_text"
 LOGGED_KEY = "shadow_memory_logged"
 POST_KEY = "shadow_memory_post_started"
 MEMO_KEY = "shadow_memory_memo_id"
+RAW_DECISION_CONTEXT_KEY = "shadow_memory_raw_decision_context"
+FINAL_DECISION_CONTEXT_KEY = "shadow_memory_final_decision_context"
+POST_DECISION_CONTEXT_KEY = "shadow_memory_post_decision_context"
+DECISION_CONTEXT_CACHE_SIZE = 100
 
 
 class Main(Star):
@@ -103,15 +115,19 @@ class Main(Star):
         self._bg_tasks: list[asyncio.Task] = []
         self._tasks: set[asyncio.Task] = set()
         self._job_ids: list[str] = []
-        self._qzone_active = True
-        self._media_active = True
-        self._send_image_active = True
+        self._jobs_registered = False
+        self._qzone_active: bool | None = None
+        self._media_active: bool | None = None
+        self._send_image_active: bool | None = None
         self._tool_use_warned: set[str] = set()
+        self._decision_contexts: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # 在 __init__ 就注册，避免 initialize 失败/未重载时页面能打开但接口 404。
         self._register_web_apis()
 
     # ------------------------------------------------------------------ 生命周期
     async def initialize(self) -> None:
+        if self.db is not None:
+            return
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db = Database(self.data_dir / "memory.db")
         await self.db.connect()
@@ -138,6 +154,7 @@ class Main(Star):
             except Exception:  # noqa: BLE001 - 卸载时任务可能已失效
                 pass
         self._job_ids.clear()
+        self._jobs_registered = False
         if self.db is not None:
             await self.db.close()
             self.db = None
@@ -177,7 +194,11 @@ class Main(Star):
         persona = PersonaService(db, configs, audit)
         insights = InsightRepo(db)
         facts = FactService(db, configs, dynamics, textgen, audit)
-        segmenter = Segmenter(db, configs, dynamics, edges, textgen, audit)
+        ambient = AmbientService(db, configs, jev, audit)
+        segmenter = Segmenter(
+            db, configs, dynamics, edges, textgen, audit,
+            on_closed=ambient.on_event_closed,
+        )
         recall = RecallService(db, configs, dynamics, edges, jev, persona, audit)
         distiller = Distiller(db, configs, persona, insights, textgen, audit)
         consolidator = Consolidator(
@@ -187,6 +208,7 @@ class Main(Star):
         seed = SeedService(db, configs, persona, facts, edges, dynamics, audit)
         self.jev = jev
         self.textgen = textgen
+        self.ambient = ambient
         self.persona = persona
         self.facts = facts
         self.memory = MemoryService(
@@ -199,6 +221,7 @@ class Main(Star):
             facts=facts,
             segmenter=segmenter,
             recall=recall,
+            ambient=ambient,
             distiller=distiller,
             consolidator=consolidator,
             decayer=decayer,
@@ -232,6 +255,7 @@ class Main(Star):
             db,
             configs,
             self.memory,
+            self.ambient,
             self.media_lib,
             transfer,
             self.kv,
@@ -475,13 +499,36 @@ class Main(Star):
 
     # ------------------------------------------------------------------ 作业
     async def _register_jobs(self) -> None:
+        if self._jobs_registered:
+            return
+        self._jobs_registered = True
         cfg = self.cfg("")
         jobs = [
-            ("persona-memory-decay", "0 3 * * *", self._job_decay),
-            ("persona-memory-facts", "15 3 * * *", self._job_facts),
-            ("persona-memory-consolidate", cfg.str("consolidation.cron", "30 3 * * *"), self._job_consolidate),
-            ("persona-memory-cleanup", "0 4 * * *", self._job_cleanup),
+            ("shadow-memory-decay", "0 3 * * *", self._job_decay),
+            ("shadow-memory-facts", "15 3 * * *", self._job_facts),
+            ("shadow-memory-consolidate", cfg.str("consolidation.cron", "30 3 * * *"), self._job_consolidate),
+            ("shadow-memory-cleanup", "0 4 * * *", self._job_cleanup),
         ]
+        try:
+            existing = await self.context.cron_manager.list_jobs()
+        except Exception as exc:  # noqa: BLE001
+            existing = []
+            self.audit.warn("读取 cron 列表失败：%s", exc)
+        for job in existing:
+            name = str(getattr(job, "name", "") or "")
+            owned = {item[0] for item in jobs}
+            legacy = {
+                "persona-memory-decay",
+                "persona-memory-facts",
+                "persona-memory-consolidate",
+                "persona-memory-cleanup",
+            }
+            if name not in owned and name not in legacy:
+                continue
+            try:
+                await self.context.cron_manager.delete_job(job.job_id)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("清理旧作业 %s 失败：%s", name, exc)
         for name, cron, handler in jobs:
             try:
                 job = await self.context.cron_manager.add_basic_job(
@@ -551,7 +598,8 @@ class Main(Star):
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.audit.warn("蒸馏巡检失败：%s", exc)
-            await asyncio.sleep(60)
+            interval = max(30, self.cfg("").int("persona.distill_check_seconds", 300, lo=30, hi=3600))
+            await asyncio.sleep(interval)
 
     async def _sweeper_loop(self) -> None:
         interval = max(60, self.cfg("").int("memory.sweeper_seconds", 300, lo=30, hi=3600))
@@ -568,24 +616,47 @@ class Main(Star):
     # ------------------------------------------------------------------ 钩子
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
     async def on_message(self, event: AstrMessageEvent) -> None:
-        if self.memory is None or self.gate_svc is None:
+        self.audit.debug(
+            "on_message_seen",
+            platform=event.get_platform_name(),
+            platform_id=event.get_platform_id(),
+            message_type=str(event.get_message_type()),
+            group_id=event.get_group_id(),
+            text_len=len((event.message_str or "").strip()),
+            at_wake=event.is_at_or_wake_command,
+            has_memory=self.memory is not None,
+            has_gate=self.gate_svc is not None,
+        )
+        if self.memory is None and self.gate_svc is None:
+            self.audit.warn("插件服务尚未初始化，跳过消息")
             return
-        try:
-            await self._observe(event)
-            await self._maybe_gate(event)
-        except Exception as exc:  # noqa: BLE001 - 不能因记忆失败打断对话
-            self.audit.warn("on_message 失败：%s", exc)
+        if self.gate_svc is not None:
+            try:
+                await self._maybe_gate(event)
+            except Exception as exc:  # noqa: BLE001 - 门控失败不能阻断记忆
+                self.audit.warn("on_message 门控失败：%s", exc)
+        if self.memory is not None:
+            try:
+                await self._observe(event)
+            except Exception as exc:  # noqa: BLE001 - 记忆失败不能打断对话
+                self.audit.warn("on_message 记忆失败：%s", exc)
+
+    def _is_group_event(self, event: AstrMessageEvent) -> bool:
+        return event.get_message_type() == MessageType.GROUP_MESSAGE or bool(
+            event.get_group_id()
+        )
 
     async def _observe(self, event: AstrMessageEvent) -> None:
-        assert self.memory is not None and self.gate_svc is not None
+        assert self.memory is not None
         text = (event.message_str or "").strip()
         if not text:
             return
         bot_id = event.get_platform_id()
         umo = event.unified_msg_origin
-        is_group = event.get_message_type() == MessageType.GROUP_MESSAGE
+        is_group = self._is_group_event(event)
         sender_name = event.get_sender_name()
-        self.gate_svc.note_message(umo, sender_name, text)
+        if self.gate_svc is not None:
+            self.gate_svc.note_message(umo, sender_name, text)
         if self.session_buffer is not None:
             try:
                 await self.session_buffer.record(bot_id, umo, "user", text, sender_name)
@@ -607,34 +678,102 @@ class Main(Star):
         )
 
     async def _maybe_gate(self, event: AstrMessageEvent) -> None:
-        assert self.gate_svc is not None
-        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+        if self.gate_svc is None:
+            self.audit.debug("group_gate_skip", reason="not_initialized")
+            return
+        if not self._is_group_event(event):
+            self.audit.debug(
+                "group_gate_skip",
+                reason="not_group",
+                platform=event.get_platform_name(),
+                message_type=str(event.get_message_type()),
+                group_id=event.get_group_id(),
+            )
             return
         if event.is_at_or_wake_command:
+            self.audit.debug("group_gate_skip", reason="already_wake")
             return
         text = (event.message_str or "").strip()
         if not text:
+            self.audit.debug(
+                "group_gate_skip",
+                reason="empty_text",
+                platform=event.get_platform_name(),
+                message_type=str(event.get_message_type()),
+            )
             return
         cfg = self.cfg(event.get_platform_id())
         if not cfg.bool("interaction.enabled", True):
+            self.audit.debug("group_gate_skip", reason="interaction_disabled")
             return
         if not cfg.bool("interaction.gate_enabled", True):
+            self.audit.debug("group_gate_skip", reason="gate_disabled")
             return
+        conversation = None
+        if self._full_context_enabled(event.get_platform_id()):
+            cached = self._cached_decision_context(event.unified_msg_origin)
+            conversation = context_for_gate(cached, text)
+            if conversation:
+                self.audit.debug(
+                    "decision_context_gate",
+                    bot_id=event.get_platform_id(),
+                    messages=len(conversation.get("messages") or []),
+                    history_chars=conversation.get("history_chars"),
+                    cache_size=len(self._decision_contexts),
+                )
         decision = await self.gate_svc.judge(
             bot_id=event.get_platform_id(),
             umo=event.unified_msg_origin,
             message=text,
             sender_name=event.get_sender_name(),
             message_id=str(getattr(event.message_obj, "message_id", "") or ""),
+            conversation=conversation,
+        )
+        self.audit.event(
+            "group_gate",
+            result="reply" if decision.passed else "silent",
+        )
+        self.audit.debug(
+            "group_gate_detail",
+            bot_id=event.get_platform_id(),
+            umo=event.unified_msg_origin,
+            passed=decision.passed,
+            p=round(decision.probability, 3) if decision.probability is not None else None,
+            threshold=decision.threshold,
+            reason=decision.reason,
+            latency_ms=decision.latency_ms,
         )
         if decision.passed:
             event.is_at_or_wake_command = True
-            self.audit.event(
-                "gate_pass",
-                bot_id=event.get_platform_id(),
-                umo=event.unified_msg_origin,
-                p=round(decision.probability or 0.0, 3),
+            event.is_wake = True
+
+    def _full_context_enabled(self, bot_id: str) -> bool:
+        try:
+            return self.cfg(bot_id).bool("decision.full_context", True)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _context_budget(self, bot_id: str) -> int:
+        try:
+            return self.cfg(bot_id).int(
+                "decision.full_context_max_chars", 16000, lo=2000, hi=64000
             )
+        except Exception:  # noqa: BLE001
+            return 16000
+
+    def _remember_decision_context(self, umo: str, context: dict[str, Any] | None) -> None:
+        if not context:
+            return
+        self._decision_contexts[umo] = context
+        self._decision_contexts.move_to_end(umo)
+        while len(self._decision_contexts) > DECISION_CONTEXT_CACHE_SIZE:
+            self._decision_contexts.popitem(last=False)
+
+    def _cached_decision_context(self, umo: str) -> dict[str, Any] | None:
+        context = self._decision_contexts.get(umo)
+        if context is not None:
+            self._decision_contexts.move_to_end(umo)
+        return context
 
     @filter.on_llm_request()
     async def on_llm_request(self, event: AstrMessageEvent, req: Any) -> None:
@@ -708,6 +847,11 @@ class Main(Star):
             )
             contexts = getattr(req, "contexts", None) or []
             context_summary = []
+            context_chars = 0
+            tool_result_chars = 0
+            if isinstance(contexts, str):
+                context_chars = len(contexts)
+                contexts = []
             for message in contexts[-10:]:
                 if not isinstance(message, dict):
                     continue
@@ -715,7 +859,42 @@ class Main(Star):
                 if message.get("tool_calls"):
                     role += "+tool"
                 context_summary.append(role)
+            for message in contexts:
+                if not isinstance(message, dict):
+                    continue
+                content = message.get("content")
+                if isinstance(content, str):
+                    size = len(content)
+                elif content is not None:
+                    size = len(json.dumps(content, ensure_ascii=False, default=str))
+                else:
+                    size = 0
+                if message.get("tool_calls"):
+                    size += len(
+                        json.dumps(message["tool_calls"], ensure_ascii=False, default=str)
+                    )
+                context_chars += size
+                if message.get("role") == "tool":
+                    tool_result_chars += size
+            extra_parts = getattr(req, "extra_user_content_parts", None) or []
+            extra_parts_chars = sum(
+                len(str(getattr(part, "text", "") or "")) for part in extra_parts
+            )
+            event.set_extra("shadow_memory_context_chars", context_chars)
+            event.set_extra("shadow_memory_tool_result_chars", tool_result_chars)
             event.set_extra("shadow_memory_context_summary", context_summary)
+            self.audit.debug(
+                "llm_request_budget",
+                bot_id=event.get_platform_id(),
+                contexts=len(contexts),
+                context_chars=context_chars,
+                tool_result_chars=tool_result_chars,
+                system_chars=len(getattr(req, "system_prompt", "") or ""),
+                schema_bytes=schema_bytes,
+                extra_parts_chars=extra_parts_chars,
+                prompt_chars=len(str(getattr(req, "prompt", "") or "")),
+                tools=len(tools),
+            )
             self.audit.debug(
                 "tool_schema_summary",
                 bot_id=event.get_platform_id(),
@@ -726,13 +905,32 @@ class Main(Star):
             )
         except Exception:  # noqa: BLE001
             event.set_extra("shadow_memory_tool_count", 0)
+        bot_id = event.get_platform_id()
+        raw_context = None
+        if self._full_context_enabled(bot_id):
+            try:
+                raw_context = build_conversation(
+                    req, max_history_chars=self._context_budget(bot_id)
+                )
+                event.set_extra(RAW_DECISION_CONTEXT_KEY, raw_context)
+                self.audit.debug(
+                    "decision_context_built",
+                    scope="raw",
+                    messages=len(raw_context.get("messages") or []),
+                    history_chars=raw_context.get("history_chars"),
+                    system_chars=len(raw_context.get("system_prompt") or ""),
+                    extra_chars=sum(len(item) for item in raw_context.get("extra_text") or []),
+                    truncated=raw_context.get("truncated"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("构建 JEV 原始上下文失败：%s", exc)
         self._check_provider_modalities(event)
         try:
             await self._inject_context(event, req)
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("固定上下文注入失败：%s", exc)
         try:
-            await self._inject(event, req)
+            await self._inject(event, req, raw_context)
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("注入失败：%s", exc)
             self.audit.debug("persona_inject_error", bot_id=event.get_platform_id(), error=str(exc))
@@ -744,6 +942,23 @@ class Main(Star):
             self._inject_say_example(event, req)
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("say 示例注入失败：%s", exc)
+        if self._full_context_enabled(bot_id):
+            try:
+                final_context = build_conversation(
+                    req, max_history_chars=self._context_budget(bot_id)
+                )
+                event.set_extra(FINAL_DECISION_CONTEXT_KEY, final_context)
+                self.audit.debug(
+                    "decision_context_built",
+                    scope="final",
+                    messages=len(final_context.get("messages") or []),
+                    history_chars=final_context.get("history_chars"),
+                    system_chars=len(final_context.get("system_prompt") or ""),
+                    extra_chars=sum(len(item) for item in final_context.get("extra_text") or []),
+                    truncated=final_context.get("truncated"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("构建 JEV 最终上下文失败：%s", exc)
 
     @staticmethod
     def _chat_scene(event: AstrMessageEvent) -> tuple[str, str, str]:
@@ -776,7 +991,7 @@ class Main(Star):
             return
         current = getattr(req, "system_prompt", "") or ""
         req.system_prompt = (current.rstrip() + "\n\n" + block) if current.strip() else block
-        self.audit.event(
+        self.audit.debug(
             "environment_injected",
             bot_id=event.get_platform_id(),
             chat_type=chat_type,
@@ -897,7 +1112,12 @@ class Main(Star):
         except Exception as exc:  # noqa: BLE001
             self.audit.debug("provider_modalities_check_failed", error=str(exc))
 
-    async def _inject(self, event: AstrMessageEvent, req: Any) -> None:
+    async def _inject(
+        self,
+        event: AstrMessageEvent,
+        req: Any,
+        decision_context: dict[str, Any] | None = None,
+    ) -> None:
         assert self.memory is not None
         bot_id = event.get_platform_id()
         umo = event.unified_msg_origin
@@ -918,7 +1138,8 @@ class Main(Star):
         veto = await self._recall_veto(bot_id, umo, query)
         recent = self._context_texts(req)
         prepared = await self.memory.prepare_turn(
-            bot_id, umo, query, recent, veto_reason=veto
+            bot_id, umo, query, recent, veto_reason=veto,
+            decision_context=decision_context,
         )
         block = prepared.persona_text.strip()
         mode = cfg.str("persona.mode", "append")
@@ -976,6 +1197,22 @@ class Main(Star):
             self.audit.debug(
                 "persona_inject_skip", bot_id=bot_id, reason="empty_persona"
             )
+        ambient_text = prepared.ambient_text.strip()
+        if ambient_text:
+            current = getattr(req, "system_prompt", "") or ""
+            if ambient_text not in current:
+                req.system_prompt = (
+                    (current.rstrip() + "\n\n" + ambient_text)
+                    if current.strip()
+                    else ambient_text
+                )
+                self.audit.debug(
+                    "ambient_injected",
+                    bot_id=bot_id,
+                    chars=len(ambient_text),
+                    recent=len(prepared.recent_event_ids),
+                    important=len(prepared.important_event_ids),
+                )
         recall_block = format_recall_block(
             list(prepared.parts), fact=bool(prepared.fact_ids)
         )
@@ -992,7 +1229,7 @@ class Main(Star):
                 kind=kind,
                 parts=len(prepared.parts),
                 chars=len(recall_block),
-                labels=["我知道"] if kind == "fact" else ["我想起", "我心里还留着"],
+                labels=["我知道"] if kind == "fact" else ["我脑子里浮起", "心里还有一点余波"],
             )
         else:
             self.audit.debug("recall_inject_skip", bot_id=bot_id, reason="no_parts")
@@ -1062,6 +1299,7 @@ class Main(Star):
     async def on_llm_response(self, event: AstrMessageEvent, response: Any) -> None:
         text = getattr(response, "completion_text", "") or ""
         event.set_extra(LLM_TEXT_KEY, text)
+        tools: list[str] = []
         try:
             tools = list(getattr(response, "tools_call_name", None) or [])
             self.audit.event(
@@ -1072,6 +1310,52 @@ class Main(Star):
             )
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("记录 LLM 工具调用失败：%s", exc)
+        bot_id = event.get_platform_id()
+        if self._full_context_enabled(bot_id):
+            try:
+                candidates: list[dict[str, Any]] = []
+                provider_request = event.get_extra("provider_request")
+                if provider_request is not None:
+                    try:
+                        candidates.append(
+                            build_conversation(
+                                provider_request,
+                                max_history_chars=self._context_budget(bot_id),
+                            )
+                        )
+                    except Exception:
+                        pass
+                final_snapshot = event.get_extra(FINAL_DECISION_CONTEXT_KEY)
+                if final_snapshot:
+                    candidates.append(final_snapshot)
+                final_context = (
+                    max(
+                        candidates,
+                        key=lambda item: (
+                            len(item.get("messages") or []),
+                            int(item.get("history_chars") or 0),
+                        ),
+                    )
+                    if candidates
+                    else None
+                )
+                post_context = context_with_response(
+                    final_context, text, tool_names=[str(name) for name in tools]
+                )
+                if post_context:
+                    event.set_extra(POST_DECISION_CONTEXT_KEY, post_context)
+                    self._remember_decision_context(
+                        event.unified_msg_origin, post_context
+                    )
+                    self.audit.debug(
+                        "decision_context_cached",
+                        scope="gate",
+                        messages=len(post_context.get("messages") or []),
+                        history_chars=post_context.get("history_chars"),
+                        cache_size=len(self._decision_contexts),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("缓存 JEV 对话快照失败：%s", exc)
         if self.db is None or self.memory is None:
             return
         pending = event.get_extra(PENDING_KEY)
@@ -1106,9 +1390,33 @@ class Main(Star):
     @filter.on_decorating_result()
     async def on_decorating_result(self, event: AstrMessageEvent) -> None:
         try:
+            self._clean_result_chain(event.get_result())
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("结果文本清理失败：%s", exc)
+        try:
             self._decorate(event)
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("结果装饰失败：%s", exc)
+
+    def _clean_result_chain(self, result: Any) -> None:
+        chain = getattr(result, "chain", None)
+        if not isinstance(chain, list):
+            return
+        kept: list[Any] = []
+        changed = 0
+        for part in chain:
+            if isinstance(part, Plain):
+                text, did = clean_text_tag(str(getattr(part, "text", "") or ""))
+                if did:
+                    changed += 1
+                    if text:
+                        part.text = text
+                        kept.append(part)
+                    continue
+            kept.append(part)
+        if changed:
+            result.chain = kept
+            self.audit.debug("outbound_text_cleaned", scope="final", changed=changed)
 
     def _decorate(self, event: AstrMessageEvent) -> None:
         cfg = self.cfg(event.get_platform_id())
@@ -1188,6 +1496,8 @@ class Main(Star):
                 user_text=user_text,
                 assistant_text=assistant,
                 speaker_name=event.get_sender_name() or "",
+                decision_context=event.get_extra(POST_DECISION_CONTEXT_KEY)
+                or event.get_extra(FINAL_DECISION_CONTEXT_KEY),
             )
             if self.gate_svc is not None:
                 self.gate_svc.note_reply(bot_id, umo)
@@ -1254,7 +1564,7 @@ class Main(Star):
                     meta = instance.meta()
                 except Exception:  # noqa: BLE001
                     continue
-                if getattr(meta, "name", "") == "aiocqhttp":
+                if str(getattr(meta, "name", "") or "").lower() in {"aiocqhttp", "napcat"}:
                     has_third_party = True
                     break
             config = self.cfg("")
@@ -1269,7 +1579,8 @@ class Main(Star):
                 "send_image": "_send_image_active",
             }
             for name, want in targets.items():
-                if want == bool(getattr(self, states[name])):
+                current = getattr(self, states[name])
+                if current is not None and want == bool(current):
                     continue
                 if want:
                     await self.context.activate_llm_tool_async(name)
@@ -1631,7 +1942,7 @@ class Main(Star):
                     compact=True,
                 )
                 if environment:
-                    self.audit.event(
+                    self.audit.debug(
                         "environment_injected",
                         bot_id=bot_id,
                         source="memo",

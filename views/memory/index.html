@@ -87,6 +87,18 @@
       </form>
     </dialog>
 
+    <dialog id="rebuild-dialog">
+      <form method="dialog" class="dialog-body">
+        <h2>重建事件</h2>
+        <p id="rebuild-old" class="muted"></p>
+        <p class="muted">会按原始对话重新生成文本，保留 salience / S / R / 状态。</p>
+        <div class="dialog-actions">
+          <button type="button" id="rebuild-cancel" class="ghost">取消</button>
+          <button type="button" id="rebuild-run">重建</button>
+        </div>
+      </form>
+    </dialog>
+
     <script type="module" src="./app.js"></script>
   </body>
 </html>

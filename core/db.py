@@ -139,6 +139,31 @@ CREATE TABLE IF NOT EXISTS facts (
   created_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS people (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  person_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  aliases TEXT,
+  last_topic TEXT,
+  last_seen INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (bot_id, person_id)
+);
+
+CREATE TABLE IF NOT EXISTS ambient_memories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  source_event_id INTEGER,
+  importance REAL NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS fact_candidates (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   bot_id TEXT NOT NULL,
@@ -313,6 +338,8 @@ CREATE INDEX IF NOT EXISTS idx_persona_bot ON persona_entries(bot_id, layer, act
 CREATE INDEX IF NOT EXISTS idx_persona_versions_bot ON persona_versions(bot_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_facts_bot ON facts(bot_id, archived, subject_id);
 CREATE INDEX IF NOT EXISTS idx_facts_valid ON facts(bot_id, valid_to);
+CREATE INDEX IF NOT EXISTS idx_people_bot_seen ON people(bot_id, last_seen);
+CREATE INDEX IF NOT EXISTS idx_ambient_bot_kind ON ambient_memories(bot_id, kind, active);
 CREATE INDEX IF NOT EXISTS idx_fact_candidates_bot ON fact_candidates(bot_id, consumed);
 CREATE INDEX IF NOT EXISTS idx_insights_bot ON insights(bot_id, used_in_version);
 CREATE INDEX IF NOT EXISTS idx_notes_bot ON notes(bot_id, kind, updated_at);

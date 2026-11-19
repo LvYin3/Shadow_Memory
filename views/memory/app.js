@@ -2,6 +2,8 @@ const bridge = window.AstrBotPluginView;
 const state = {
   bots: [],
   selected: "",
+  detail: null,
+  rebuild: null,
   tts: [],
   defaults: {},
 };
@@ -84,7 +86,29 @@ function section(title, rows, render) {
   return `<div class="detail-block"><h3>${title}</h3><ul>${rows.map(render).join("")}</ul></div>`;
 }
 
+function renderAmbient(ambient) {
+  if (!ambient || !ambient.text) {
+    return `<div class="detail-block"><h3>常驻背景</h3><p class="muted">（空）</p></div>`;
+  }
+  const recent = (ambient.recent || [])
+    .map((row) => String(row.summary || row.fragment || "").trim())
+    .filter(Boolean);
+  const people = (ambient.people || []).map((row) => {
+    const topic = String(row.last_topic || "").trim();
+    return topic ? `${row.name}（${topic}）` : String(row.name || "");
+  }).filter(Boolean);
+  const important = (ambient.important || [])
+    .map((row) => String(row.text || "").trim())
+    .filter(Boolean);
+  const blocks = [];
+  if (recent.length) blocks.push(`<p><b>最近</b>：${recent.map(esc).join("；")}</p>`);
+  if (people.length) blocks.push(`<p><b>认识的人</b>：${people.map(esc).join("；")}</p>`);
+  if (important.length) blocks.push(`<p><b>重要</b>：${important.map(esc).join("；")}</p>`);
+  return `<div class="detail-block"><h3>常驻背景</h3>${blocks.join("")}</div>`;
+}
+
 function renderDetail(data) {
+  state.detail = data;
   const panel = $("detail");
   panel.innerHTML = `
     <div class="detail-head">
@@ -99,6 +123,7 @@ function renderDetail(data) {
         <button id="open-transfer">转移</button>
       </div>
     </div>
+    ${renderAmbient(data.ambient)}
     ${section("人格", data.persona, (row) => `<li><b>${esc(row.layer)}</b> ${esc(row.text)}</li>`)}
     ${section("事实", data.facts, (row) => `<li>${row.key_fact ? "★ " : ""}${esc(row.text)} <span class="muted">${esc(row.kind)}</span></li>`)}
     ${section(
@@ -121,25 +146,52 @@ function renderDetail(data) {
   $("export-seed").onclick = () => exportBot(data.bot_id, "seed");
   $("open-import").onclick = () => openImport(data.bot_id);
   $("open-transfer").onclick = () => openTransfer(data.bot_id);
-  panel.querySelectorAll("[data-rebuild]").forEach((node) => {
-    node.addEventListener("click", () => rebuildEvent(data, node.dataset.rebuild));
-  });
 }
 
-async function rebuildEvent(data, eventId) {
+function openRebuildDialog(data, eventId) {
+  if (!data) return;
   const row = (data.events || []).find((item) => String(item.id) === String(eventId));
   if (!row) return;
+  state.rebuild = { botId: data.bot_id, eventId: Number(eventId) };
   const oldFragment = row.fragment || "（空）";
   const oldSummary = (row.summary || "（空）").slice(0, 240);
-  const ok = confirm(
-    `重建这条事件？\n\n旧碎片：${oldFragment}\n旧摘要：${oldSummary}\n\n` +
-      "会按原始对话重新生成文本，保留 salience / S / R / 状态。",
-  );
-  if (!ok) return;
+  $("rebuild-old").textContent = `旧碎片：${oldFragment}\n旧摘要：${oldSummary}`;
+  $("rebuild-dialog").showModal();
+}
+
+async function runRebuild() {
+  const pending = state.rebuild;
+  const dialog = $("rebuild-dialog");
+  if (!pending) return;
+  const button = $("rebuild-run");
+  button.disabled = true;
   try {
-    await apiPost("event/rebuild", { bot: data.bot_id, event_id: Number(eventId) });
+    await apiPost("event/rebuild", {
+      bot: pending.botId,
+      event_id: pending.eventId,
+    });
+    dialog.close();
+    state.rebuild = null;
+    await refreshAll();
     toast("重建完成");
-    await selectBot(data.bot_id);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function refreshAll() {
+  try {
+    await loadOverview();
+    if (state.selected) {
+      const data = await apiGet("detail", { bot: state.selected });
+      renderDetail(data);
+    }
+    if (!$("panel-settings").classList.contains("hidden")) {
+      await loadSettings();
+    }
+    toast("已刷新");
   } catch (error) {
     toast(error.message, true);
   }
@@ -379,6 +431,27 @@ function switchTab(name) {
   if (name === "settings") loadSettings();
 }
 
+document.addEventListener("click", (event) => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  if (target.closest("#refresh")) {
+    void refreshAll();
+    return;
+  }
+  const rebuild = target.closest("[data-rebuild]");
+  if (rebuild && !rebuild.disabled) {
+    openRebuildDialog(state.detail, rebuild.dataset.rebuild);
+    return;
+  }
+  if (target.closest("#rebuild-cancel")) {
+    $("rebuild-dialog").close();
+    return;
+  }
+  if (target.closest("#rebuild-run")) {
+    void runRebuild();
+  }
+});
+
 async function boot() {
   if (!bridge) {
     document.body.innerHTML = '<p class="muted">这个页面需要在 AstrBot WebUI 中打开。</p>';
@@ -389,10 +462,6 @@ async function boot() {
   console.info("[shadow-memory] view", context.pluginName, context.pageName);
   document.querySelectorAll(".tab").forEach((node) => {
     node.addEventListener("click", () => switchTab(node.dataset.tab));
-  });
-  $("refresh").addEventListener("click", () => {
-    loadOverview();
-    if (!$("panel-settings").classList.contains("hidden")) loadSettings();
   });
   $("preview-btn").addEventListener("click", previewTransfer);
   $("transfer-run").addEventListener("click", runTransfer);

@@ -43,6 +43,19 @@
         "description": "失败重试次数",
         "default": 1,
         "slider": {"min": 0, "max": 3, "step": 1}
+      },
+      "full_context": {
+        "type": "bool",
+        "description": "把对话模型的文本上下文也交给 JEV（system、history、当前 prompt、extra 文本）",
+        "hint": "会发送完整人格和对话历史到外部判断服务；关闭后恢复轻量 state。",
+        "default": true
+      },
+      "full_context_max_chars": {
+        "type": "int",
+        "description": "JEV 上下文历史字符预算",
+        "hint": "system_prompt 始终完整保留；只限制从最新到最旧的历史。",
+        "default": 16000,
+        "slider": {"min": 2000, "max": 64000, "step": 1000}
       }
     }
   },
@@ -193,7 +206,26 @@
       "theta_aux": {"type": "float", "description": "辅句注入阈值", "default": 0.35},
       "cooldown_turns": {"type": "int", "description": "同一记忆冷却轮数", "default": 10},
       "no_inject_last_turns": {"type": "int", "description": "最近 N 轮注入过则不再注入", "default": 3},
-      "max_inject_chars": {"type": "int", "description": "单条注入字数上限", "default": 40}
+      "max_inject_chars": {"type": "int", "description": "单条注入字数上限", "default": 40},
+      "skip_smalltalk": {"type": "bool", "description": "寒暄/短消息跳过召回", "default": true},
+      "min_query_chars": {"type": "int", "description": "短消息判定的最少有效字符数", "default": 2}
+    }
+  },
+  "ambient": {
+    "type": "object",
+    "description": "常驻背景记忆：近期事件、认识的人、重要记忆",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用常驻背景", "default": true},
+      "recent_days": {"type": "int", "description": "近期事件回看天数", "default": 7},
+      "recent_limit": {"type": "int", "description": "近期事件最多条数", "default": 5},
+      "recent_max_chars": {"type": "int", "description": "近期事件总字数上限", "default": 150},
+      "people_limit": {"type": "int", "description": "常驻人物上限", "default": 5},
+      "person_topic_chars": {"type": "int", "description": "每个人物最近话题字数上限", "default": 20},
+      "important_limit": {"type": "int", "description": "重要记忆上限", "default": 5},
+      "important_chars": {"type": "int", "description": "每条重要记忆字数上限", "default": 20},
+      "promote_threshold": {"type": "float", "description": "Jev 重要记忆晋升阈值", "default": 0.75},
+      "total_max_chars": {"type": "int", "description": "常驻背景总字数上限", "default": 400},
+      "min_salience": {"type": "int", "description": "低于该 salience 不进行重要记忆判断", "default": 3}
     }
   },
   "consolidation": {
@@ -237,6 +269,8 @@
       "quota_tension": {"type": "int", "description": "未消解张力条数", "default": 3},
       "distill_days": {"type": "int", "description": "蒸馏周期（天）", "default": 7},
       "distill_events": {"type": "int", "description": "蒸馏候选事件数阈值", "default": 20},
+      "distill_retry_minutes": {"type": "int", "description": "蒸馏失败后的重试退避（分钟）", "default": 360},
+      "distill_check_seconds": {"type": "int", "description": "蒸馏巡检间隔（秒）", "default": 300},
       "entry_min_chars": {"type": "int", "description": "条目最少字数", "default": 50},
       "entry_max_chars": {"type": "int", "description": "条目最多字数", "default": 70},
       "max_ops": {"type": "int", "description": "单次蒸馏最多操作数", "default": 3},

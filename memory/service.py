@@ -20,7 +20,8 @@ from .edges import EdgeRepo
 from .facts import FactService
 from .insights import InsightRepo
 from .persona import PersonaService
-from .recall import RecallService
+from .ambient import AmbientService
+from .recall import RecallService, is_smalltalk
 from .seed import SeedService
 from .segmenter import Segmenter
 from .textutil import trim_at_boundary
@@ -34,6 +35,9 @@ class TurnInjection:
     parts: list[str] = field(default_factory=list)
     injection: Injection | None = None
     fact_ids: list[int] = field(default_factory=list)
+    ambient_text: str = ""
+    recent_event_ids: list[int] = field(default_factory=list)
+    important_event_ids: list[int] = field(default_factory=list)
     reason: str = ""
 
 
@@ -60,6 +64,7 @@ class MemoryService:
         facts: FactService,
         segmenter: Segmenter,
         recall: RecallService,
+        ambient: AmbientService,
         distiller: Distiller,
         consolidator: Consolidator,
         decayer: Decayer,
@@ -78,6 +83,7 @@ class MemoryService:
         self.facts = facts
         self.segmenter = segmenter
         self.recall = recall
+        self.ambient = ambient
         self.distiller = distiller
         self.consolidator = consolidator
         self.decayer = decayer
@@ -108,6 +114,7 @@ class MemoryService:
         now: int | None = None,
         *,
         veto_reason: str | None = None,
+        decision_context: dict[str, Any] | None = None,
     ) -> TurnInjection:
         stamp = now or self.now_fn()
         cfg = self.configs(bot_id)
@@ -117,8 +124,25 @@ class MemoryService:
             result.reason = "memory_disabled"
             return result
 
-        injection = await self.recall.decide(
-            bot_id, umo, query, recent_turns, stamp, veto_reason=veto_reason
+        try:
+            ambient = await self.ambient.snapshot(bot_id, stamp)
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("常驻背景读取失败：%s", exc)
+            ambient = None
+        if ambient is not None:
+            result.ambient_text = ambient.text
+            result.recent_event_ids = list(ambient.recent_event_ids)
+            result.important_event_ids = list(ambient.important_event_ids)
+        if cfg.bool("recall.skip_smalltalk", True) and is_smalltalk(
+            query, cfg.int("recall.min_query_chars", 2, lo=1, hi=10)
+        ):
+            result.reason = "smalltalk"
+            self.audit.debug("recall_skip", bot_id=bot_id, reason="smalltalk")
+            return result
+        injection = await self.recall.decide_with_aux(
+            bot_id, umo, query, recent_turns, stamp, veto_reason=veto_reason,
+            exclude_event_ids=set(ambient.recent_event_ids) if ambient else set(),
+            decision_context=decision_context,
         )
         result.injection = injection
         result.reason = injection.reason
@@ -128,7 +152,7 @@ class MemoryService:
             if main_text:
                 result.parts.append(main_text)
                 await self.recall.apply_recall(injection.main, stamp)
-            aux = await self.recall.aux(bot_id, stamp, exclude=query)
+            aux = injection.aux
             if aux:
                 result.parts.append(aux)
             return result
@@ -153,6 +177,7 @@ class MemoryService:
         assistant_text: str,
         speaker_name: str = "",
         now: int | None = None,
+        decision_context: dict[str, Any] | None = None,
     ) -> PostTurn:
         stamp = now or self.now_fn()
         cfg = self.configs(bot_id)
@@ -171,10 +196,15 @@ class MemoryService:
             "user_message": (user_text or "")[:400],
             "my_reply": (assistant_text or "")[:400],
         }
+        judge_state = (
+            {**state, "conversation": decision_context}
+            if decision_context
+            else state
+        )
         answers = None
         if getattr(self.jev, "available", False):
             answers = await self.jev.ask(
-                state,
+                judge_state,
                 {
                     "salience": {
                         "type": "score",
@@ -195,6 +225,34 @@ class MemoryService:
                     },
                 },
             )
+            if not answers and judge_state is not state:
+                self.audit.debug(
+                    "decision_context_fallback",
+                    scope="post_turn",
+                    reason="jev_failed",
+                )
+                answers = await self.jev.ask(
+                    state,
+                    {
+                        "salience": {
+                            "type": "score",
+                            "instructions": prompts.SALIENCE_INSTRUCTION,
+                            "criteria": prompts.SALIENCE_LEVELS,
+                        },
+                        "conflict": {
+                            "type": "noul",
+                            "instructions": prompts.CONFLICT_INSTRUCTION,
+                        },
+                        "durable_fact": {
+                            "type": "noul",
+                            "instructions": prompts.DURABLE_FACT_INSTRUCTION,
+                        },
+                        "topic_end": {
+                            "type": "noul",
+                            "instructions": prompts.TOPIC_END_INSTRUCTION,
+                        },
+                    },
+                )
         if answers:
             score = float(answers.get("salience", {}).get("score", 1.0))
             output.salience = min(5, max(1, int(round(score)) + 1))

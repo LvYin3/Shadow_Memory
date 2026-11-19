@@ -11,6 +11,7 @@ from astrbot_plugin_shadow_memory.core.db import Database
 from astrbot_plugin_shadow_memory.interaction.gate import Gate
 from astrbot_plugin_shadow_memory.interaction.notes import NoteService
 from astrbot_plugin_shadow_memory.interaction.sessions import SessionCatalog
+from astrbot_plugin_shadow_memory.memory.ambient import AmbientService
 from astrbot_plugin_shadow_memory.memory.consolidate import Consolidator
 from astrbot_plugin_shadow_memory.memory.decay import Decayer
 from astrbot_plugin_shadow_memory.memory.distill import Distiller
@@ -48,7 +49,11 @@ def build_stack(
     persona = PersonaService(db, configs, audit)
     insights = InsightRepo(db)
     facts = FactService(db, configs, dynamics, text, audit)
-    segmenter = Segmenter(db, configs, dynamics, edges, text, audit)
+    ambient = AmbientService(db, configs, jev, audit)
+    segmenter = Segmenter(
+        db, configs, dynamics, edges, text, audit,
+        on_closed=ambient.on_event_closed,
+    )
     recall = RecallService(db, configs, dynamics, edges, jev, persona, audit)
     distiller = Distiller(db, configs, persona, insights, text, audit)
     consolidator = Consolidator(db, configs, dynamics, edges, persona, insights, facts, text, audit)
@@ -64,6 +69,7 @@ def build_stack(
         persona=persona,
         insights=insights,
         facts=facts,
+        ambient=ambient,
         segmenter=segmenter,
         recall=recall,
         distiller=distiller,
@@ -86,6 +92,7 @@ def build_stack(
         persona=persona,
         insights=insights,
         facts=facts,
+        ambient=ambient,
         segmenter=segmenter,
         recall=recall,
         distiller=distiller,

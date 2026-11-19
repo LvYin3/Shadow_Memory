@@ -162,10 +162,12 @@ class FakeJev:
         self.score_value = score
         self.ask_value = ask
         self.calls: list[tuple[str, Any]] = []
+        self.states: list[Any] = []
         self.stats = {"calls": 0}
 
     async def ask(self, state, questions):
         self.calls.append(("ask", questions))
+        self.states.append(state)
         if self.ask_value is not None:
             return self.ask_value
         answers = {}
@@ -181,6 +183,7 @@ class FakeJev:
 
     async def choice(self, state, instructions, options):
         self.calls.append(("choice", dict(options)))
+        self.states.append(state)
         if self.choice_value is not None:
             return dict(self.choice_value)
         keys = list(options)
@@ -188,10 +191,12 @@ class FakeJev:
 
     async def noul(self, state, instructions, criteria=None):
         self.calls.append(("noul", instructions))
+        self.states.append(state)
         return self.noul_value
 
     async def score(self, state, instructions, levels):
         self.calls.append(("score", levels))
+        self.states.append(state)
         return self.score_value
 
 

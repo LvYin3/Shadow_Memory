@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from astrbot_plugin_shadow_memory.memory.recall import is_smalltalk
 from astrbot_plugin_shadow_memory.memory.textutil import trim_at_boundary
 
 from ..fakes import FakeJev
@@ -137,6 +138,57 @@ async def test_decide_judge_failure(stack):
     assert injection.reason == "judge_failed"
 
 
+async def test_decide_with_aux_uses_one_ask(stack):
+    now = 100 * DAY
+    event = await _event(stack.db, "海边风很大", ["海边"], last=now - DAY, ended=now)
+    await stack.persona.add_tension("bot1", "我还在想那天的风。", [event], now)
+    stack.jev.ask_value = {
+        "main": {"choice": "c0", "probabilities": {"none": 0.1, "c0": 0.9}},
+        "aux": {"choice": "t0", "probabilities": {"none": 0.1, "t0": 0.9}},
+    }
+    injection = await stack.recall.decide_with_aux("bot1", "umo1", "海边", [], now)
+    assert injection.main is not None
+    assert injection.aux == "我还在想那天的风。"
+    assert [call[0] for call in stack.jev.calls] == ["ask"]
+
+
+async def test_decide_with_aux_receives_full_conversation_context(stack):
+    now = 100 * DAY
+    await _event(stack.db, "海边风很大", ["海边"], last=now - DAY, ended=now)
+    stack.jev.ask_value = {
+        "main": {"choice": "c0", "probabilities": {"none": 0.1, "c0": 0.9}},
+        "aux": {"choice": "none", "probabilities": {"none": 0.9}},
+    }
+    conversation = {"messages": [{"role": "user", "content": "之前"}]}
+    await stack.recall.decide_with_aux(
+        "bot1", "umo1", "海边", [], now, decision_context=conversation
+    )
+    assert stack.jev.states[-1]["conversation"] == conversation
+
+
+async def test_smalltalk_skips_recall_without_jev(stack):
+    now = 100 * DAY
+    await _event(stack.db, "海边风很大", ["海边"], last=now - DAY, ended=now)
+    prepared = await stack.service.prepare_turn("bot1", "umo1", "在吗？", [], now)
+    assert prepared.reason == "smalltalk"
+    assert prepared.parts == []
+    assert stack.jev.calls == []
+
+
+async def test_no_candidates_does_not_call_jev(stack):
+    prepared = await stack.service.prepare_turn("bot1", "umo1", "今天吃什么", [], 100 * DAY)
+    assert prepared.parts == []
+    assert stack.jev.calls == []
+
+
+def test_smalltalk_helper():
+    assert is_smalltalk("在吗？")
+    assert is_smalltalk("哈哈哈")
+    assert is_smalltalk("……")
+    assert not is_smalltalk("为啥")
+    assert not is_smalltalk("你还记得海边吗")
+
+
 async def _failing_choice(state, instructions, options):
     return None
 
@@ -174,3 +226,14 @@ def test_trim_at_boundary_prefers_sentence_end():
     body = "第一句话说完。第二句话还没说完"
     assert trim_at_boundary(body, 8) == "第一句话说完。"
     assert trim_at_boundary("短句", 10) == "短句"
+
+async def test_candidates_exclude_recent_event_ids(stack):
+    now = 1_800_000_000_000
+    first = await _event(stack.db, "一起去海边", ["海边"], ended=now, last=now)
+    second = await _event(stack.db, "海边的风很大", ["海边"], ended=now, last=now)
+    candidates, _ = await stack.recall.candidates(
+        "bot1", "海边", now, exclude_event_ids={first}
+    )
+    ids = {int(item.event_id) for item in candidates}
+    assert first not in ids
+    assert second in ids

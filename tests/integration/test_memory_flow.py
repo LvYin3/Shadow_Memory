@@ -34,9 +34,10 @@ async def test_full_memory_cycle(stack):
     assert closed["fragment"]
 
     prepared = await stack.service.prepare_turn("bot1", "umo1", "还记得海边吗", [], now + 5000)
-    assert prepared.parts, prepared.reason
+    assert prepared.ambient_text
+    assert "海边" in prepared.ambient_text
     assert prepared.injection is not None
-    assert len(prepared.parts) <= 2
+    assert prepared.injection.main is None  # 普通近期事件已常驻，细节召回跳过
 
     for index, body in enumerate(["又聊到海边", "还是那阵风", "小明也在"]):
         await _observe(stack, body, now + 90_000_000 + index * 1000)

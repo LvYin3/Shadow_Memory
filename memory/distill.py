@@ -15,6 +15,8 @@ from .persona import PersonaService
 
 ConfigProvider = Callable[[str], ConfigView]
 
+FAILURE_REASONS = {"no_sources", "text_unavailable", "error"}
+
 
 class Distiller:
     def __init__(
@@ -37,13 +39,29 @@ class Distiller:
 
     async def last_cycle(self, bot_id: str) -> int:
         value = await self.db.scalar(
-            "SELECT MAX(cycle_at) FROM distill_logs WHERE bot_id=?", (bot_id,), default=0
+            "SELECT MAX(cycle_at) FROM distill_logs WHERE bot_id=? "
+            "AND reason NOT IN ('no_sources','text_unavailable','error')",
+            (bot_id,),
+            default=0,
         )
         return int(value or 0)
+
+    async def last_log(self, bot_id: str) -> dict[str, Any] | None:
+        return await self.db.fetchone(
+            "SELECT reason, created_at FROM distill_logs WHERE bot_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (bot_id,),
+        )
 
     async def due(self, bot_id: str, now: int | None = None) -> tuple[bool, str]:
         cfg = self.configs(bot_id)
         stamp = now or self.now_fn()
+        attempt = await self.last_log(bot_id)
+        if attempt and str(attempt.get("reason") or "") in FAILURE_REASONS:
+            retry_ms = cfg.int("persona.distill_retry_minutes", 360, lo=1, hi=10080) * 60_000
+            created = int(attempt.get("created_at") or 0)
+            if created and stamp - created < retry_ms:
+                return False, "retry_backoff"
         last = await self.last_cycle(bot_id)
         baseline = last
         if not last:
@@ -81,6 +99,7 @@ class Distiller:
         entries = await self.persona.entries(bot_id)
         tensions = [entry for entry in entries if entry.layer == "tension"]
         if not gists and not insights and not tensions:
+            await self._log(bot_id, stamp, 0, 0, 0, 0, 0, "no_sources")
             return DistillResult(skipped="no_sources")
 
         persona_text = await self.persona.render(bot_id)
@@ -96,25 +115,31 @@ class Distiller:
             source_lines.append(f"[tension {entry.id}] {entry.text}")
         sources = "\n".join(source_lines)[:6000]
 
-        result = await self.textgen.generate_json(
-            prompts.DISTILL_SYSTEM,
-            prompts.DISTILL_USER.format(
-                chars=len(persona_text),
-                limit=cfg.int("persona.hard_chars", 1600),
-                persona=persona_text or "（空）",
-                core=counts.get("core", 0),
-                edge=counts.get("edge", 0),
-                tension=counts.get("tension", 0),
-                core_q=cfg.int("persona.quota_core", 6),
-                edge_q=cfg.int("persona.quota_edge", 7),
-                tension_q=cfg.int("persona.quota_tension", 3),
-                sources=sources,
-            ),
-            bot_id=bot_id,
-            schema_hint=prompts.DISTILL_SCHEMA,
-            task="distill",
-        )
+        try:
+            result = await self.textgen.generate_json(
+                prompts.DISTILL_SYSTEM,
+                prompts.DISTILL_USER.format(
+                    chars=len(persona_text),
+                    limit=cfg.int("persona.hard_chars", 1600),
+                    persona=persona_text or "（空）",
+                    core=counts.get("core", 0),
+                    edge=counts.get("edge", 0),
+                    tension=counts.get("tension", 0),
+                    core_q=cfg.int("persona.quota_core", 6),
+                    edge_q=cfg.int("persona.quota_edge", 7),
+                    tension_q=cfg.int("persona.quota_tension", 3),
+                    sources=sources,
+                ),
+                bot_id=bot_id,
+                schema_hint=prompts.DISTILL_SCHEMA,
+                task="distill",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("蒸馏请求失败：%s", exc)
+            await self._log(bot_id, stamp, len(gists), len(insights), 0, 0, 0, "error")
+            return DistillResult(skipped="error")
         if not isinstance(result, dict):
+            await self._log(bot_id, stamp, len(gists), len(insights), 0, 0, 0, "text_unavailable")
             return DistillResult(skipped="text_unavailable")
 
         raw_ops = result.get("ops")

@@ -68,6 +68,7 @@ class Gate:
         sender_name: str,
         message_id: str = "",
         now: int | None = None,
+        conversation: dict[str, Any] | None = None,
     ) -> GateDecision:
         stamp = now or self.now_fn()
         cfg = self.configs(bot_id)
@@ -102,8 +103,18 @@ class Gate:
             "persona_tendencies": await self._tendencies(bot_id, message),
             "current_message": {"speaker": sender_name, "text": (message or "")[:500]},
         }
+        judge_state = (
+            {**state, "conversation": conversation} if conversation else state
+        )
         started = clock_mod.now_ms()
-        probability = await self.jev.noul(state, prompts.REPLY_NOW_INSTRUCTION)
+        probability = await self.jev.noul(judge_state, prompts.REPLY_NOW_INSTRUCTION)
+        if probability is None and judge_state is not state:
+            self.audit.debug(
+                "decision_context_fallback",
+                scope="gate",
+                reason="jev_failed",
+            )
+            probability = await self.jev.noul(state, prompts.REPLY_NOW_INSTRUCTION)
         latency = clock_mod.now_ms() - started
         if probability is None:
             self._failures[umo] = self._failures.get(umo, 0) + 1

@@ -17,6 +17,25 @@ from .textutil import bigrams, overlap, trim_at_boundary
 
 ConfigProvider = Callable[[str], ConfigView]
 
+_SMALLTALK = {
+    "在吗", "在么", "在不在", "在嘛", "哈哈", "哈哈哈", "hhh",
+    "嗯", "嗯嗯", "哦", "哦哦", "好", "好的", "好吧",
+    "晚安", "早安", "谢谢", "你好",
+}
+
+
+def is_smalltalk(query: str, min_chars: int = 2) -> bool:
+    body = "".join(
+        char
+        for char in str(query or "").strip().lower()
+        if char.isalnum() or "\u4e00" <= char <= "\u9fff"
+    )
+    if not body:
+        return True
+    if body in _SMALLTALK:
+        return True
+    return len(body) < max(1, int(min_chars))
+
 
 class RecallService:
     def __init__(
@@ -42,7 +61,8 @@ class RecallService:
 
     # ------------------------------------------------------------------ 候选
     async def candidates(
-        self, bot_id: str, query: str, now: int
+        self, bot_id: str, query: str, now: int, *,
+        exclude_event_ids: set[int] | None = None,
     ) -> tuple[list[Candidate], int]:
         cfg = self.configs(bot_id)
         limit = cfg.int("recall.max_candidates", 12, lo=1, hi=50)
@@ -52,6 +72,8 @@ class RecallService:
             "AND kind IN ('episodic', 'gist') ORDER BY ended_at DESC LIMIT 200",
             (bot_id,),
         )
+        excluded = exclude_event_ids or set()
+        rows = [row for row in rows if int(row.get("id") or 0) not in excluded]
         tokens = bigrams(query)
         scored: list[tuple[float, dict[str, Any], float]] = []
         below_floor = 0
@@ -111,7 +133,7 @@ class RecallService:
                         "AND merged_into IS NULL",
                         (neighbor_id, bot_id),
                     )
-                    if neighbor is None:
+                    if neighbor is None or int(neighbor_id) in excluded:
                         continue
                     r_value = self.dynamics.r(
                         float(neighbor.get("storage_strength") or 0.0),
@@ -162,11 +184,14 @@ class RecallService:
         now: int,
         *,
         veto_reason: str | None = None,
+        exclude_event_ids: set[int] | None = None,
     ) -> Injection:
         cfg = self.configs(bot_id)
         if veto_reason:
             return Injection(reason=veto_reason)
-        candidates, below_floor = await self.candidates(bot_id, query, now)
+        candidates, below_floor = await self.candidates(
+            bot_id, query, now, exclude_event_ids=exclude_event_ids
+        )
         if not candidates:
             return Injection(
                 reason="r_below_floor" if below_floor else "none_wins",
@@ -212,6 +237,154 @@ class RecallService:
             p_top=best_value,
             candidates=len(candidates),
         )
+
+    @staticmethod
+    def _resolve_main(
+        probabilities: dict[str, Any],
+        candidates: list[Candidate],
+        threshold: float,
+    ) -> Injection:
+        p_none = float(probabilities.get("none", 0.0))
+        best_key = "none"
+        best_value = p_none
+        for index in range(len(candidates)):
+            key = f"c{index}"
+            value = float(probabilities.get(key, 0.0))
+            if value > best_value:
+                best_key, best_value = key, value
+        if best_key == "none":
+            return Injection(
+                reason="none_wins",
+                p_none=p_none,
+                p_top=best_value,
+                candidates=len(candidates),
+            )
+        if best_value < threshold:
+            return Injection(
+                reason="below_threshold",
+                p_none=p_none,
+                p_top=best_value,
+                candidates=len(candidates),
+            )
+        return Injection(
+            main=candidates[int(best_key[1:])],
+            reason="injected",
+            p_none=p_none,
+            p_top=best_value,
+            candidates=len(candidates),
+        )
+
+    async def decide_with_aux(
+        self,
+        bot_id: str,
+        umo: str,
+        query: str,
+        recent_turns: list[str],
+        now: int,
+        *,
+        veto_reason: str | None = None,
+        exclude_event_ids: set[int] | None = None,
+        decision_context: dict[str, Any] | None = None,
+    ) -> Injection:
+        """一次 ask 同时判断主句和张力辅句；没有张力时退回单 choice。"""
+        cfg = self.configs(bot_id)
+        if veto_reason:
+            return Injection(reason=veto_reason)
+        candidates, below_floor = await self.candidates(
+            bot_id, query, now, exclude_event_ids=exclude_event_ids
+        )
+        if not candidates:
+            return Injection(
+                reason="r_below_floor" if below_floor else "none_wins",
+                candidates=0,
+            )
+        if not getattr(self.jev, "available", False):
+            return Injection(reason="no_provider", candidates=len(candidates))
+
+        entries = await self.persona.entries(bot_id)
+        tensions = [entry for entry in entries if entry.layer == "tension"][:4]
+        main_options = {"none": "此刻什么也没想起来"}
+        for index, candidate in enumerate(candidates):
+            main_options[f"c{index}"] = trim_at_boundary(candidate.fragment, 60)
+        state = await self._build_state(
+            bot_id, umo, query, recent_turns, candidates, now
+        )
+        judge_state = (
+            {**state, "conversation": decision_context}
+            if decision_context
+            else state
+        )
+        threshold = cfg.float("recall.theta_pre", 0.40, lo=0.0, hi=1.0)
+
+        if not tensions:
+            probabilities = await self.jev.choice(
+                judge_state, prompts.RECALL_INSTRUCTION, main_options
+            )
+            if not probabilities and judge_state is not state:
+                self.audit.debug(
+                    "decision_context_fallback",
+                    scope="recall",
+                    reason="jev_failed",
+                )
+                probabilities = await self.jev.choice(
+                    state, prompts.RECALL_INSTRUCTION, main_options
+                )
+            if not probabilities:
+                return Injection(reason="judge_failed", candidates=len(candidates))
+            return self._resolve_main(dict(probabilities), candidates, threshold)
+
+        aux_options = {"none": "此刻没有余波"}
+        for index, entry in enumerate(tensions):
+            aux_options[f"t{index}"] = trim_at_boundary(entry.text, 70)
+        questions = {
+            "main": {
+                "type": "choice",
+                "instructions": prompts.RECALL_INSTRUCTION,
+                "criteria": main_options,
+            },
+            "aux": {
+                "type": "choice",
+                "instructions": prompts.AUX_INSTRUCTION,
+                "criteria": aux_options,
+            },
+        }
+        answers = await self.jev.ask(judge_state, questions)
+        if not answers and judge_state is not state:
+            self.audit.debug(
+                "decision_context_fallback",
+                scope="recall_aux",
+                reason="jev_failed",
+            )
+            answers = await self.jev.ask(state, questions)
+        if not answers:
+            return Injection(reason="judge_failed", candidates=len(candidates))
+        main_answer = answers.get("main") or {}
+        probabilities = main_answer.get("probabilities")
+        if not isinstance(probabilities, dict):
+            return Injection(reason="judge_failed", candidates=len(candidates))
+        injection = self._resolve_main(probabilities, candidates, threshold)
+        if injection.main is None:
+            return injection
+
+        aux_answer = answers.get("aux") or {}
+        aux_probabilities = aux_answer.get("probabilities")
+        if not isinstance(aux_probabilities, dict):
+            return injection
+        aux_none = float(aux_probabilities.get("none", 0.0))
+        aux_key = "none"
+        aux_value = aux_none
+        for index in range(len(tensions)):
+            key = f"t{index}"
+            value = float(aux_probabilities.get(key, 0.0))
+            if value > aux_value:
+                aux_key, aux_value = key, value
+        if aux_key != "none" and aux_value >= cfg.float(
+            "recall.theta_aux", 0.35, lo=0.0, hi=1.0
+        ):
+            injection.aux = trim_at_boundary(
+                tensions[int(aux_key[1:])].text, 40
+            )
+        return injection
 
     async def _build_state(
         self,

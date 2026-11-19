@@ -209,10 +209,17 @@ def test_plugin_source_uses_expected_hooks():
         "event/rebuild",
         "web_event_rebuild",
         "rebuild_event",
+        "on_event_closed",
+        "ambient_text",
     ):
         assert snippet in main_text, snippet
     db_text = (PLUGIN / "core" / "db.py").read_text(encoding="utf-8")
     assert "CREATE TABLE IF NOT EXISTS session_messages" in db_text
+    assert "CREATE TABLE IF NOT EXISTS people" in db_text
+    assert "CREATE TABLE IF NOT EXISTS ambient_memories" in db_text
+    service_text = (PLUGIN / "memory" / "service.py").read_text(encoding="utf-8")
+    assert "exclude_event_ids" in service_text
+    assert "ambient_text" in service_text
     assert "bot.call_action" in qzone_text
     config_text = (PLUGIN / "core" / "config.py").read_text(encoding="utf-8")
     assert "default_image_caption_provider_id" in config_text

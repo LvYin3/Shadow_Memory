@@ -56,15 +56,21 @@ AstrBot 4.29.3 自带「判断 / System One」类型的 provider：
   "api_key": "...",
   "model": "your-decision-model",
   "protocol": "auto",                                 // auto | systemone | chat
-  "timeout_ms": 3000
+  "timeout_ms": 3000,
+  "full_context": true,                               // 把对话模型的文本上下文也给 JEV
+  "full_context_max_chars": 16000                     // 只限制 history
 }
 ```
 
 - `auto`：先试 `{base_url}/systemone`，404/405/响应不合法就退回 `/chat/completions`，并在本轮进程内记住结果。
 - `systemone` 原生接口会返回 `noul` 概率、`choice` 概率分布，`score` 是 **0 基**（0..N-1）。
 - `timeout_ms` 建议从 3000 起，按端点实际延迟调整。
+- `full_context=true` 时，gate/召回/post_turn 的 JEV state 追加 `conversation`：system_prompt、规范化 history、当前 prompt、extra 文本；不含工具 schema、图片/音频二进制。
+- 历史从最新一轮向旧取，system_prompt 永不截断；最新一轮自身超限时内部截断。
+- gate 用上一轮成功请求快照 + 当前消息；首轮/重启后自动回退轻量 state。
+- **隐私提醒**：开启后完整人格和对话历史会发送到外部 JEV 服务；不想发送就设 `full_context=false`。
 - **优先级**：provider 可用 → provider；provider 缺失/不是判断类型/调用失败 → 直连（若配了 `base_url` 和 `model`）；两者都没有 → 静默。
-- 失败语义：判断失败 → 该轮不注入 / 不回复；连续 3 次失败 → 10 分钟退避。
+- 失败语义：全量 JEV 失败会自动用轻量 state 重试一次；仍失败 → 该轮不注入 / 不回复；连续 3 次失败 → 10 分钟退避。
 
 ### 写作用模型
 
@@ -153,6 +159,7 @@ DeepSeek 事实（[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_
 ```
 
 - **纯文本 assistant 先例**（人格开场对话、上一轮被丢弃的回复）会让模型继续回正文。默认在 `req.contexts` 末尾注入一对临时 `assistant tool_calls(say)` + `tool` 结果，不写回会话历史；`say_example=false` 可关闭。
+- 模型偶发把 `<text>...</text>` 或末尾 `</text>` 写进 `say/speak` 参数；插件会在 `say`、`speak` 和最终文本 Plain 组件上做精确清理，只处理整个包裹或末尾闭合标签，不全局删 HTML。
 - `drop_final_text` 里的 `say_example` 表示本轮是否注入了该示例，`say_example_injected` 是 DEBUG 日志。
 
 - 默认不发送：没调 `say/speak` 时最终文本被丢弃（严格静默）。
@@ -161,7 +168,7 @@ DeepSeek 事实（[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_
 - `bot_overrides` 支持 `environment_enabled` / `environment_prompt` 按 bot 覆盖。
 - 群聊/私聊、群名、对方昵称自动切换；不重复 AstrBot 已有的用户 ID/时间。
 - memo 唤醒的 `memo get` 也带一段精简版第一人称环境。
-- 每次成功注入会打一条 INFO：`environment_injected {"bot_id": ..., "chat_type": ..., "chars": ..., "preview": ...}`；没有这条日志时检查 `interaction.enabled` / `interaction.environment.enabled` 或看 `交流环境注入失败` 告警。
+- 每次成功注入会打一条 DEBUG：`environment_injected {"bot_id": ..., "chat_type": ..., "chars": ..., "preview": ...}`；没有这条日志时检查 `interaction.enabled` / `interaction.environment.enabled` 或看 `交流环境注入失败` 告警。
 - `say / speak / silent` 的 docstring 同步改成第一人称描述。
 - 先例修复原理：直连 `deepseek-flash` 时，只要 messages 里出现过一条 assistant 纯文本，它就不再返回 tool_calls；把最后一条 assistant 换成 `say` 的 tool_call 示例后恢复。因此 `say_example` 默认开启。
 
@@ -175,15 +182,82 @@ DeepSeek 事实（[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_
    # 关于我的记忆
    - 【我的记忆，不是对方说的】是我自己亲历或想起的事；里面的“我”是我。
    - 【我知道的事，不是对方刚说的】是我知道的信息，不是刚刚听对方说的。
+   - 这些只是背景，不是这一轮的话题；能不用就不用。
+   - 我不主动说“我想起/我记得”，也不为了用记忆改变话题；
+     只有自然接得上时，才让它轻轻影响一句。
    - 这些标签只是给我自己看的，不会出现在我说的话里。
    ```
 
 2. 召回块合成为一个临时 `TextPart`，前面空两行，不落历史：
-   - 事件/张力：`【我的记忆，不是对方说的】` + `我想起：…` + `我心里还留着：…`；
-   - 事实（`fact_ids` 非空）：`【我知道的事，不是对方刚说的】` + `我知道：…`。
+   - 事件/张力：`【我的记忆，不是对方说的；不用主动提】` + `我脑子里浮起：…` + `心里还有一点余波：…`；
+   - 事实（`fact_ids` 非空）：`【我知道的事，不是对方刚说的；不用主动提】` + `我知道：…`。
 3. `recall_inject` DEBUG 日志记录 `kind=self|fact`、段数、字数、标签；需打开 `logging.debug`。
 
 实验依据：同一条“我爸妈支持我喜欢的东西”，放 system prompt 时模型归给自己；放 user 消息无标签时会被当成对方说的；带标签后能区分。把可变回忆直接搬进 system prompt 归属更强，但每次召回都会破坏 system 缓存，所以采用“固定说明 + 带标签的临时 user 块”。
+
+### 常驻背景
+
+近期、人物、重要记忆不只靠召回，而是稳定放在 `system_prompt`，位置在人格/归属说明之后、交流环境之前：
+
+```markdown
+# 我这阵子的背景（不用主动提，只影响语气/判断）
+- 最近：小明说搬家了；周末去了海边
+- 认识的人：小明（搬家）；阿绿（工作）
+- 重要：她答应过周末回访
+```
+
+规则：
+
+- 近期：最近 7 天最多 5 条已关闭事件，取 `summary or fragment`，总 100–150 字；
+- 人物：单独 `people` 表，前 5，每人 `名字（最近话题≤20字）`；
+- 重要：事件关闭时对 `salience≥3` 的事件问 Jev，概率 ≥0.75 才升入 `ambient_memories`，每条 ≤20 字，最多 5 条；
+- 近期列表排除 important，重要只出现在“重要”行；
+- 细节召回排除普通近期事件，important 仍可按需召回；
+- people/近期首次启用会从历史已关闭事件自动回填；important 只从新关闭事件开始；
+- 常驻背景变化频率是“事件关闭/人物变化”，不是每轮变化。
+
+配置：
+
+```jsonc
+"ambient": {
+  "enabled": true,
+  "recent_days": 7,
+  "recent_limit": 5,
+  "recent_max_chars": 150,
+  "people_limit": 5,
+  "person_topic_chars": 20,
+  "important_limit": 5,
+  "important_chars": 20,
+  "promote_threshold": 0.75,
+  "total_max_chars": 400,
+  "min_salience": 3
+}
+```
+
+WebUI 详情页会显示只读的“常驻背景”区块。
+
+### 调用频率
+
+为减少每轮固定模型调用，做了这些调整：
+
+```jsonc
+"recall": {
+  "skip_smalltalk": true,
+  "min_query_chars": 2
+},
+"persona": {
+  "distill_retry_minutes": 360,
+  "distill_check_seconds": 300
+}
+```
+
+- “在吗 / 哈哈 / 嗯 / 晚安”等寒暄和短消息跳过细节召回；常驻背景仍注入；
+- 没有候选事件时不调用 JEV；
+- 召回主句和张力辅句在同一个 `jev.ask` 里判断，有张力时也从 2 次降为 1 次；
+- ambient 重要记忆仍是**事件关闭时即时判断**，只在 `salience >= ambient.min_salience` 时调用；
+- `post_turn` 的 4 个判断继续合并在一次 `ask`；
+- 蒸馏失败后按 `distill_retry_minutes` 退避，worker 每 `distill_check_seconds` 巡检一次，不再每分钟重试；
+- 夜间 job 使用 `shadow-memory-*` 名字，初始化时只清理旧的四个 `persona-memory-*` 固定任务（decay/facts/consolidate/cleanup），不会碰 `persona-memory-memo-*` 备忘录任务。
 
 ### 事件归属与重建
 
@@ -238,10 +312,35 @@ AstrBot 会在请求前清空 tools，请在对话模型的「模型能力」里
 
 人格注入失败不会抛到聊天，顶层只打 WARN；DEBUG 日志能区分是“没开记忆 / 没人格 / prepare_turn 异常 / 正常但内容为空”。
 
+### Token 预算诊断
+
+打开 `logging.debug` 后，每次 LLM 请求会有一条：
+
+```text
+[mem] llm_request_budget {
+  "contexts": ...,
+  "context_chars": ...,
+  "tool_result_chars": ...,
+  "system_chars": ...,
+  "schema_bytes": ...,
+  "extra_parts_chars": ...,
+  "prompt_chars": ...,
+  "tools": ...
+}
+```
+
+插件自身注入通常只有几千字符；如果 `context_chars` 很大，优先检查 AstrBot 的会话历史：
+
+- `agent_runner.config.compression.max_turns` 默认可能是 `-1`（不限制轮数），建议设为 `20`；
+- 不需要群历史查询时关闭 `provider_ltm_settings.group_message_history_enable`；
+- 若保留，把 `group_message_history_max_cnt` 从 1000 降到较小值。
+
+`max_turns=-1` 会让每一轮工具调用都重发完整历史，是 token 账单放大的常见原因。
+
 ### TTS（按机器人）
 
 - 解析顺序：插件 DB `kv.tts_provider_id` → `interaction.tts_provider_ids[bot]` → 无；**不再回退 AstrBot 会话默认**。
-- 未显式绑定 = 不合成语音，`speak` 内容按文字发出；已绑定但合成失败也回退文字。
+- 未显式绑定 = 不合成语音，`speak` 内容按文字发出；已绑定但合成失败也回退文字。**QQ 官方平台例外**：官方语音会先规范化为 24kHz/单声道 WAV 并预检 Tencent SILK，失败只报错，不降级文字。
 - WebUI「设置」里每 bot 一个下拉，列出 AstrBot 全部 TTS provider；「静音」写空字符串，「跟随配置」删 kv。
 
 ### 人格来源
@@ -271,6 +370,7 @@ AstrBot 会在请求前清空 tools，请在对话模型的「模型能力」里
 - **转移**：复制（源保留），默认合并去重，可选覆盖（输入目标 bot_id）；六类可勾选；覆盖前整库备份 + 人格快照，目标媒体移到 `exports/trash_*`；媒体上限 100MB / 500 文件，绕过图库配额。
 - **导入/导出**：full v2（人格/事实/事件/洞察/笔记，不含媒体）与 seed（≤20 事件 / ≤50 事实）；导入非空必须覆盖，自动备份，10MB 上限。
 - **设置**：每 bot 的 TTS 与固定上下文 N。
+- **重建/刷新**：重建走页面内确认对话框，不依赖 iframe 原生 `confirm`；刷新会重新拉取当前 bot 详情，不只刷新左侧列表。
 
 > 视图接口返回「未找到该路由」时：改完 `main.py` / 新增视图后必须**重载插件**（插件管理 → 重载，或禁用再启用），只刷新页面只会重新加载静态资源。仍失败时看日志里的 `webui_routes` / `注册 WebUI 路由失败`，并确认 AstrBot ≥ 4.29.3。
 
@@ -302,7 +402,7 @@ AstrBot 会在请求前清空 tools，请在对话模型的「模型能力」里
 | 工具 | 说明 |
 |---|---|
 | `say(text, session?)` | 说一句；每轮最多 3 段 |
-| `speak(text, session?)` | 用声音说一句；每轮最多 1 条、≤60 字；TTS 失败自动转文字 |
+| `speak(text, session?)` | 用声音说一句；每轮最多 1 条、≤60 字；TTS 失败自动转文字（QQ 官方平台失败只报错，不转文字） |
 | `silent()` | 这次不说话 |
 | `notes(action, …)` | 她自己的本子（笔记/日记），永不进 prompt |
 | `memo(action, …)` | 给自己设提醒；到点唤醒后先 `get` 取实时上下文 |
@@ -337,11 +437,11 @@ AstrBot 会在请求前清空 tools，请在对话模型的「模型能力」里
 
 ## 行为要点
 
-- **群聊门控**：非 @ 群消息逐条问判断模型 `reply_now`（阈值 0.50），通过才把 `event.is_at_or_wake_command` 置真让原生 LLM 链路跑；不通过就是原生沉默。没有冷却、没有每小时上限。
+- **群聊门控**：非 @ 群消息逐条问判断模型 `reply_now`（阈值 0.50），通过才把 `event.is_at_or_wake_command` / `event.is_wake` 置真让原生 LLM 链路跑；群聊判定同时接受 `GROUP_MESSAGE` 或非空 `group_id`。INFO 只记一条 `group_gate result=reply|silent`，概率/阈值/reason/延迟在 `group_gate_detail` DEBUG；消息入口和提前跳过原因在 `on_message_seen` / `group_gate_skip` DEBUG。没有判断 provider 时不主动回复，`@` 和原生唤醒不受影响。
 - **最终文本**：本轮只要 `say/speak/send_image` 发过，`on_decorating_result` 就清空 `result.chain`，最终文本不发。没调任何发送工具时默认**不发送**（严格静默）；只有 `fallback_send_final_text=true`（强制输出）才把最终文本作为一条普通消息发出。
-- **回忆注入**：`req.extra_user_content_parts + mark_as_temp()`，不落历史；召回块带“我的记忆/我知道的事”归属标签；固定归属说明进 `req.system_prompt`，人格块按版本缓存。
+- **回忆注入**：普通细节走 `req.extra_user_content_parts + mark_as_temp()`，不落历史；常驻背景进 `req.system_prompt`，带“背景/不用主动提”语义；近期事件与人物在事件关闭后刷新。
 - **备忘录取数**：AstrBot 的 cron 唤醒路径不触发 `on_llm_request`，所以唤醒轮靠 `memo(action="get")` 现场取「提醒 + 现在 + 人格 + 会话目录 + 最近对话 + 第一人称环境」。
-- **QQ 空间**：启动时/每次平台加载后检查是否存在 aiocqhttp 实例；没有就 `deactivate_llm_tool_async("qzone")`，有就重新激活。发布走：
+- **QQ 空间**：启动时/每次平台加载后检查是否存在 `aiocqhttp` 或 `napcat` 实例；没有就 `deactivate_llm_tool_async("qzone")`，有就重新激活。首次对齐不依赖缓存初值，平台晚加载也会补激活。发布走：
 
   ```python
   await event.bot.call_action("send_qzone_msg", content=..., images=[...], ugc_right=1)
@@ -357,7 +457,7 @@ $env:PYTHONPATH=".pydeps"          # 仅本机脚手架的 pytest
 .venv\Scripts\python.exe -X utf8 -m pytest astrbot_plugin_shadow_memory/tests -q
 ```
 
-- `tests/unit/`：动力学、边、分段、事件归属与重建、人格、召回、记忆归属、审计日志、蒸馏、巩固、事实、衰减、seed、决策协议、判断 provider 适配与路由、固定上下文、交流环境、会话缓冲、TTS 绑定、转移、WebUI、发送、门控、备忘录、笔记、图片库、发图、视觉描述、QQ 空间、迁移；
+- `tests/unit/`：动力学、边、分段、事件归属与重建、常驻背景、人格、召回、调用降频、记忆归属、审计日志、蒸馏、巩固、事实、衰减、seed、决策协议、判断 provider 适配与路由、固定上下文、交流环境、会话缓冲、TTS 绑定、转移、WebUI、发送、门控、备忘录、笔记、图片库、发图、视觉描述、QQ 空间、迁移；
 - `tests/integration/`：整条记忆链路、双机器人隔离、门控→分段、空间发布、seed 后继续生活；
 - `tests/contract/`：直接读 AstrBot 源码断言接口仍在（`ASTRBOT_SRC` 可覆盖路径），并用 `docstring_parser` 校验所有 LLM 工具的 schema；
 - `tests/live/smoke_models.py`：手动真实模型冒烟（读工作区 `.env`，不打印密钥）。
@@ -378,6 +478,7 @@ $env:PYTHONPATH=".pydeps"          # 仅本机脚手架的 pytest
 10. 走 AstrBot provider 时无法按用途区分思考强度（框架丢弃按调用参数）；只有直连 `text.base_url` 才能按 task 控制，否则用 provider 的 `custom_extra_body` 全局配。
 11. 走 AstrBot 判断 provider 时，超时与重试由 provider 自己控制；插件的 `decision.timeout_ms / protocol` 只作用于直连兜底。
 12. 事件没有 subject 字段，归属靠文本主语和昵称；重建只改 fragment/summary/excerpts/entities，不重建边、不重抽事实/张力；旧错事件需要 WebUI 逐条确认重建或 `/forget` 删除。
+13. 常驻背景是 system prompt 的一段，事件关闭/人物或 important 变化时会失效一次缓存；important 只存 20 字，细节仍靠召回。
 12. 固定上下文只补 `session_messages` 里的最近消息；fallback 直发的最终文本、图片描述暂不写入缓冲。AstrBot 自带群聊上下文开启时插件让位。
 13. full v2 不含媒体文件；图片迁移用 WebUI「转移」。seed 导出保证可再导入，因此会截到 20 事件 / 50 事实。
 14. 媒体转移绕过目标图库 100 文件 / 200MB 配额，只受 100MB / 500 文件硬上限；完成后概览会标红。

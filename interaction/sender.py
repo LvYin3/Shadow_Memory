@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from ..core.audit import Audit
 from ..core.config import ConfigView
+from .audio import normalize_audio_for_official, preflight_tencent_silk
+from .text_clean import clean_text_tag
 
 ConfigProvider = Callable[[str], ConfigView]
 TTSResolver = Callable[[str, str], Awaitable[Any]]
@@ -14,8 +17,16 @@ SendTo = Callable[[str, Any], Awaitable[bool]]
 RecordFactory = Callable[[str], Any]
 ImageFactory = Callable[[bytes], Any]
 TextFactory = Callable[[str], Any]
+SilkPrecheck = Callable[[Any], Awaitable[tuple[bool, str]]]
 
 STATE_KEY = "shadow_memory_send_state"
+
+
+def _file_size(path: Any) -> int:
+    try:
+        return Path(str(path)).stat().st_size
+    except OSError:
+        return 0
 
 
 @dataclass
@@ -56,6 +67,7 @@ class Sender:
         record_factory: RecordFactory | None = None,
         image_factory: ImageFactory | None = None,
         text_factory: TextFactory | None = None,
+        silk_precheck: SilkPrecheck | None = None,
     ) -> None:
         self.configs = configs
         self.audit = audit
@@ -64,6 +76,7 @@ class Sender:
         self._record_factory = record_factory
         self._image_factory = image_factory
         self._text_factory = text_factory
+        self._silk_precheck = silk_precheck or preflight_tencent_silk
 
     async def say(
         self,
@@ -75,7 +88,9 @@ class Sender:
     ) -> str:
         cfg = self.configs(bot_id)
         state = state_of(event)
-        body = (text or "").strip()
+        body, cleaned = clean_text_tag(text)
+        if cleaned:
+            self.audit.debug("outbound_text_cleaned", scope="say")
         if not body:
             return "（没说出口）"
         limit = cfg.int("interaction.max_segments", 3, lo=1, hi=10)
@@ -110,7 +125,9 @@ class Sender:
     ) -> str:
         cfg = self.configs(bot_id)
         state = state_of(event)
-        body = (text or "").strip()
+        body, cleaned = clean_text_tag(text)
+        if cleaned:
+            self.audit.debug("outbound_text_cleaned", scope="speak")
         if not body:
             return "（没出声）"
         max_chars = cfg.int("interaction.speak_max_chars", 60, lo=1, hi=300)
@@ -121,18 +138,52 @@ class Sender:
             state.errors.append("speak_exceeded")
             return "这一轮已经用声音说过一句了。"
         provider = await self._resolve_tts(bot_id, umo)
+        official = event.get_platform_name() == "qq_official"
         if provider is None or self._record_factory is None:
+            if official:
+                self.audit.warn("没有可用的 TTS，官方语音未发送")
+                return "没有可用的 TTS，未发送"
             self.audit.warn("没有可用的 TTS，说话降级为文字")
             return await self.say(event, bot_id=bot_id, text=body, target_session=target_session)
         try:
             path = await provider.get_audio(body)
         except Exception as exc:  # noqa: BLE001
+            if official:
+                self.audit.warn("官方 TTS 合成失败，未发送：%s", exc)
+                return "TTS 合成失败，未发送"
             self.audit.warn("TTS 合成失败，降级为文字：%s", exc)
             return await self.say(event, bot_id=bot_id, text=body, target_session=target_session)
         if not path:
+            if official:
+                return "TTS 没有返回音频，未发送"
             return await self.say(event, bot_id=bot_id, text=body, target_session=target_session)
+
+        normalized_path = None
+        audio_path = str(path)
+        if official:
+            try:
+                normalized_path = await normalize_audio_for_official(path)
+                audio_path = str(normalized_path)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("官方语音格式化失败，未发送：%s", exc)
+                return "语音格式化失败，未发送"
+            try:
+                ok, detail = await self._silk_precheck(normalized_path)
+            except Exception as exc:  # noqa: BLE001
+                ok, detail = False, str(exc) or repr(exc)
+            if not ok:
+                normalized_path.unlink(missing_ok=True)
+                self.audit.warn("官方语音 SILK 预检失败，未发送：%s", detail)
+                return "语音转换失败，未发送"
+            self.audit.debug(
+                "speak_audio_official",
+                source_suffix=Path(str(path)).suffix,
+                source_size=_file_size(path),
+                normalized_size=_file_size(normalized_path),
+            )
+
         try:
-            chain = event.chain_result([self._record_factory(path)])
+            chain = event.chain_result([self._record_factory(audio_path)])
             if target_session and self._send_to is not None:
                 ok = await self._send_to(target_session, chain)
                 if not ok:
@@ -140,8 +191,15 @@ class Sender:
             else:
                 await event.send(chain)
         except Exception as exc:  # noqa: BLE001
+            if normalized_path is not None:
+                normalized_path.unlink(missing_ok=True)
+            if official:
+                self.audit.warn("官方语音发送失败，未降级：%s", exc)
+                return "语音发送失败，未发送"
             self.audit.warn("语音发送失败，降级为文字：%s", exc)
             return await self.say(event, bot_id=bot_id, text=body, target_session=target_session)
+        if normalized_path is not None:
+            normalized_path.unlink(missing_ok=True)
         state.speaks += 1
         state.spoken_texts.append(body)
         state.sent = True

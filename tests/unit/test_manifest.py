@@ -104,6 +104,7 @@ def test_all_framework_free_modules_import():
         "memory.recall",
         "memory.recall_format",
         "memory.distill",
+        "memory.ambient",
         "memory.consolidate",
         "memory.decay",
         "memory.seed",
