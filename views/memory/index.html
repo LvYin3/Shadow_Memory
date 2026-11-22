@@ -19,6 +19,7 @@
 
     <nav class="tabs">
       <button class="tab active" data-tab="overview">概览</button>
+      <button class="tab" data-tab="story">故事</button>
       <button class="tab" data-tab="settings">设置</button>
     </nav>
 
@@ -28,6 +29,15 @@
         <div id="detail" class="detail">
           <p class="muted">点左边任意机器人查看明细。</p>
         </div>
+      </section>
+
+      <section id="panel-story" class="panel hidden">
+        <div class="settings-head">
+          <h2>故事：她在聊天之外的生活</h2>
+          <p class="muted">这里只有运维信息和她自己的视角（状态卡、她记下的事）。完整转录、设定集和主持人笔记会剧透，不在页面上显示，需要时用“导出故事数据”。</p>
+          <p id="story-master" class="muted"></p>
+        </div>
+        <div id="story-list" class="settings-list"></div>
       </section>
 
       <section id="panel-settings" class="panel hidden">
@@ -79,6 +89,7 @@
         <label>JSON 文件（≤10MB）
           <input id="import-file" type="file" accept="application/json,.json" />
         </label>
+        <p class="muted">支持 persona_seed、full 备份和世界种子（world_seed）。导入世界种子会换掉大纲和种子设定，演出中新增的设定不动，也不需要勾选覆盖。</p>
         <label class="check"><input id="import-force" type="checkbox" /> 覆盖目标已有记忆（自动备份）</label>
         <div class="dialog-actions">
           <button type="button" id="import-cancel" class="ghost">取消</button>

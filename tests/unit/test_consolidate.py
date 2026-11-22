@@ -73,6 +73,27 @@ async def test_disabled_consolidation_returns_nothing(stack, make_configs):
     assert await local.consolidator.clusters("bot1", DAY + 10) == []
 
 
+@pytest.mark.parametrize(
+    ("story_count", "expected"), [(3, "story"), (2, "chat"), (0, "chat")]
+)
+async def test_gist_source_follows_cluster(stack, story_count, expected):
+    sources = await _three_events(stack)
+    for event_id in sources[:story_count]:
+        await stack.db.execute("UPDATE events SET source='story' WHERE id=?", (event_id,))
+    stack.text.push(
+        {
+            "gist_fragment": "海边的那阵风我一直记着",
+            "gist_summary": "",
+            "entities": ["海边", "风"],
+            "supersede": [],
+            "insights": [],
+        }
+    )
+    await stack.service.consolidate("bot1", DAY + 60_000)
+    gist = await stack.db.fetchone("SELECT source FROM events WHERE kind='gist'")
+    assert gist["source"] == expected
+
+
 async def test_run_creates_gist_and_merges_sources(stack):
     sources = await _three_events(stack)
     stack.text.push(

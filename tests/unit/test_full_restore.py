@@ -78,6 +78,22 @@ async def make_memory(stack, bot_id="bot1"):
     return await stack.service.export_full(bot_id)
 
 
+async def test_full_restore_keeps_event_source(stack):
+    await stack.seed.import_seed("bot1", seed_payload(), force=True)
+    await stack.db.execute(
+        "UPDATE events SET source='story' WHERE bot_id='bot1' AND fragment LIKE '周末%'"
+    )
+    payload = await stack.service.export_full("bot1")
+    await stack.seed.restore_full("bot2", payload)
+    rows = await stack.db.fetchall(
+        "SELECT fragment, source FROM events WHERE bot_id='bot2'"
+    )
+    assert {row["fragment"]: row["source"] for row in rows} == {
+        "第一次见面是在雨天，她借了我一把伞": "chat",
+        "周末一起去看海，风很大": "story",
+    }
+
+
 async def test_full_restore_into_empty_bot(stack):
     payload = await make_memory(stack)
     counts = await stack.seed.restore_full("bot2", payload)

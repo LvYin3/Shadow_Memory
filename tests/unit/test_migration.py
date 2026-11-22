@@ -5,14 +5,14 @@ import sqlite3
 
 import pytest
 
-from astrbot_plugin_shadow_memory.core.db import Database
+from astrbot_plugin_shadow_memory.core.db import SCHEMA_VERSION, Database
 
 
 async def test_fresh_database_sets_schema_version(workdir):
     path = workdir / "fresh.db"
     db = Database(path)
     await db.connect()
-    assert await db.scalar("PRAGMA user_version") == 2
+    assert await db.scalar("PRAGMA user_version") == SCHEMA_VERSION
     tables = await db.fetchall("SELECT name FROM sqlite_master WHERE type='table'")
     names = {row["name"] for row in tables}
     assert {
@@ -23,6 +23,10 @@ async def test_fresh_database_sets_schema_version(workdir):
         "media_items",
         "media_logs",
         "kv",
+        "story_state",
+        "story_scenes",
+        "story_canon",
+        "story_notes",
     } <= names
     await db.close()
 
@@ -37,7 +41,7 @@ async def test_connect_is_idempotent(workdir):
     second = Database(path)
     await second.connect()
     assert await second.kv_get("b", "k") == "v"
-    assert await second.scalar("PRAGMA user_version") == 2
+    assert await second.scalar("PRAGMA user_version") == SCHEMA_VERSION
     await second.close()
 
 
@@ -72,8 +76,15 @@ async def test_v1_database_gets_new_columns(workdir):
     columns = {
         row["name"] for row in await db.fetchall("PRAGMA table_info(events)")
     }
-    assert {"storage_strength", "retrievability", "last_recalled_at", "merged_into"} <= columns
-    assert await db.scalar("PRAGMA user_version") == 2
+    assert {
+        "storage_strength",
+        "retrievability",
+        "last_recalled_at",
+        "merged_into",
+        "source",
+    } <= columns
+    assert await db.scalar("SELECT source FROM events LIMIT 1") == "chat"
+    assert await db.scalar("PRAGMA user_version") == SCHEMA_VERSION
     row = await db.fetchone("SELECT fragment FROM events LIMIT 1")
     assert row["fragment"] == "旧事件"
     indexes = await db.fetchall("SELECT name FROM sqlite_master WHERE type='index'")

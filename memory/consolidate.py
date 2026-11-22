@@ -55,7 +55,7 @@ class Consolidator:
         max_events = cfg.int("consolidation.max_events_per_cluster", 5, lo=2, hi=20)
         rows = await self.db.fetchall(
             "SELECT id, fragment, summary, entities, salience, storage_strength, ended_at, "
-            "last_recalled_at, umo FROM events WHERE bot_id=? AND status='closed' "
+            "last_recalled_at, umo, source FROM events WHERE bot_id=? AND status='closed' "
             "AND merged_into IS NULL AND kind='episodic' AND ended_at >= ? ORDER BY ended_at ASC",
             (bot_id, now - lookback),
         )
@@ -227,8 +227,9 @@ class Consolidator:
             gist_id = await self.db.execute(
                 "INSERT INTO events(bot_id, umo, kind, started_at, ended_at, participants, "
                 "turn_count, char_count, fragment, summary, entities, source_event_ids, "
-                "storage_strength, retrievability, last_recalled_at, salience, status, created_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "storage_strength, retrievability, last_recalled_at, salience, status, "
+                "source, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     bot_id,
                     str(cluster[0].get("umo") or ""),
@@ -247,6 +248,10 @@ class Consolidator:
                     now,
                     salience,
                     "closed",
+                    # 全是故事事件并出来的印象仍算故事；只要掺了聊天就算聊天
+                    "story"
+                    if all(str(event.get("source") or "") == "story" for event in cluster)
+                    else "chat",
                     now,
                 ),
             )

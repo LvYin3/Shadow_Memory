@@ -378,8 +378,8 @@ class TransferService:
             "INSERT INTO events(bot_id, umo, kind, started_at, ended_at, participants, "
             "turn_count, char_count, fragment, summary, excerpts, entities, source_event_ids, "
             "storage_strength, retrievability, last_recalled_at, last_injected_at, salience, "
-            "conflict, truncated, status, created_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?)",
+            "conflict, truncated, status, source, created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?,?,?,?)",
             (
                 bot_id,
                 "",
@@ -401,6 +401,7 @@ class TransferService:
                 int(row.get("conflict") or 0),
                 int(row.get("truncated") or 0),
                 row.get("status") or "closed",
+                "story" if str(row.get("source") or "") == "story" else "chat",
                 int(row.get("created_at") or self.now_fn()),
             ),
         )

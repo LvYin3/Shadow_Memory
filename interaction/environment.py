@@ -49,10 +49,17 @@ def build_environment_prompt(
     rules: str = "",
     enabled: bool = True,
     compact: bool = False,
+    life_lines: list[str] | None = None,
 ) -> str:
-    """生成第一人称环境块；只说明场景与 say，不规定该场景下的动作。"""
+    """生成第一人称环境块；只说明场景与 say，不规定该场景下的动作。
+
+    ``life_lines`` 是故事模块给的状态卡（她此刻在哪、在做什么）。它一天会变很多次，
+    所以放在整块的最后，前面不变的部分仍能命中提示词缓存。
+    """
     if not enabled:
         return ""
+    life = [line for line in (life_lines or []) if line and line.strip()]
+    life_block = "\n".join(["# 我自己这边", *life]) if life else ""
     chat_type = (chat_type or "other").lower()
     label = platform_label(platform)
     lead = " " if label and ord(label[0]) < 128 else ""
@@ -71,9 +78,13 @@ def build_environment_prompt(
     if compact:
         lines.append("- 我说文字消息必须调用 say 函数；比如对方说“在吗”，我就调 say(text=\"在吗\")。")
         lines.append("- say/speak 的 text 只放正文，不要输出 <text> 或任何 XML/HTML 标签。")
+        if life_block:
+            lines.extend(["", life_block])
         return "\n".join(lines)
 
     body = (rules or "").strip() or DEFAULT_RULES
     lines.append("")
     lines.append(body)
+    if life_block:
+        lines.extend(["", life_block])
     return "\n".join(lines)

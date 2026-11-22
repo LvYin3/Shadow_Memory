@@ -143,6 +143,15 @@ def test_all_framework_free_modules_import():
         "interaction.environment",
         "interaction.session_buffer",
         "interaction.tts_binding",
+        "story.bucket",
+        "story.oracle",
+        "story.card",
+        "story.world",
+        "story.prompts",
+        "story.llm",
+        "story.store",
+        "story.director",
+        "story.service",
         "webui.service",
     ]
     for name in modules:

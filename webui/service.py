@@ -44,7 +44,9 @@ class WebUIService:
         tts_providers: Callable[[], list[dict[str, str]]],
         platform_ids: Callable[[], list[str]] | None = None,
         now_fn: Callable[[], int] = clock_mod.now_ms,
+        story: Any = None,
     ) -> None:
+        self.story = story
         self.db = db
         self.configs = configs
         self.memory = memory
@@ -70,6 +72,8 @@ class WebUIService:
             if isinstance(section, dict):
                 ids.update(str(item) for item in section.keys() if item)
         rows = await self.db.fetchall("SELECT DISTINCT bot_id FROM kv")
+        ids.update(str(row["bot_id"]) for row in rows if row.get("bot_id"))
+        rows = await self.db.fetchall("SELECT bot_id FROM story_state")
         ids.update(str(row["bot_id"]) for row in rows if row.get("bot_id"))
         return sorted(ids)
 
@@ -186,7 +190,7 @@ class WebUIService:
                 (bot_id,),
             ),
             "events": await self.db.fetchall(
-                "SELECT e.id, e.fragment, e.summary, e.salience, e.status, e.ended_at, "
+                "SELECT e.id, e.fragment, e.summary, e.salience, e.status, e.ended_at, e.source, "
                 "EXISTS(SELECT 1 FROM event_turns t WHERE t.event_id=e.id) AS has_turns "
                 "FROM events e WHERE e.bot_id=? AND e.merged_into IS NULL "
                 "ORDER BY e.ended_at DESC LIMIT 20",
@@ -355,8 +359,11 @@ class WebUIService:
             payload = await self.memory.export_full(bot_id)
         elif kind == "seed":
             payload = await self.memory.export_seed(bot_id)
+        elif kind == "story":
+            # 完整的故事数据：世界种子、设定集、主持人笔记、场景转录。含剧透。
+            payload = await self._story().export(bot_id)
         else:
-            raise WebUIError("kind 只能是 full / seed")
+            raise WebUIError("kind 只能是 full / seed / story")
         folder = self.data_dir / "exports"
         folder.mkdir(parents=True, exist_ok=True)
         filename = f"{_safe(bot_id)}_{kind}_{self.now_fn()}.json"
@@ -372,6 +379,12 @@ class WebUIService:
             raise WebUIError("导入内容必须是 JSON 对象")
         version = str(payload.get("version") or "")
         backup = ""
+        if version.startswith("world_seed"):
+            try:
+                result = await self._story().import_seed(bot_id, payload)
+            except ValueError as exc:
+                raise WebUIError(str(exc)) from exc
+            return {"bot_id": bot_id, "kind": "world_seed", "counts": result, "backup": ""}
         if version.startswith("persona_seed"):
             if force:
                 path = self._backup_path(bot_id)
@@ -389,6 +402,43 @@ class WebUIService:
         if backup:
             await self._prune_backups()
         return {"bot_id": bot_id, "counts": counts, "backup": backup}
+
+    # ------------------------------------------------------------------ 故事
+    def _story(self) -> Any:
+        if self.story is None:
+            raise WebUIError("故事模块还没准备好")
+        return self.story
+
+    async def story_overview(self) -> dict[str, Any]:
+        """故事页签：运维信息和她的视角。不含完整转录、设定集正文和主持人笔记。"""
+        story = self._story()
+        return {
+            "master_enabled": story.master_enabled(),
+            "bots": [await story.status(bot_id) for bot_id in await self.bot_ids()],
+        }
+
+    async def story_action(self, bot_id: str, action: str) -> dict[str, Any]:
+        """开关类操作直接执行；``wake`` 只做检查，真正的演出由调用方放到后台。"""
+        bot_id = self._require_bot_id(bot_id)
+        story = self._story()
+        handlers = {
+            "on": story.enable,
+            "off": story.disable,
+            "pause": story.pause,
+            "resume": story.resume,
+        }
+        try:
+            if action == "wake":
+                await story.check_wake(bot_id)
+                return {"bot_id": bot_id, "started": True}
+            handler = handlers.get(action)
+            if handler is None:
+                raise WebUIError("action 只能是 on / off / pause / resume / wake")
+            return await handler(bot_id)
+        except WebUIError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - StoryError 等统一转成页面可读的错误
+            raise WebUIError(str(exc)) from exc
 
     # ------------------------------------------------------------------ 文件
     def _require_bot_id(self, bot_id: Any) -> str:

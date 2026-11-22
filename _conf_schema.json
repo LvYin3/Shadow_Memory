@@ -354,6 +354,31 @@
       "catalog_limit": {"type": "int", "description": "会话目录条数上限", "default": 10}
     }
   },
+  "story": {
+    "type": "object",
+    "description": "故事模块：让角色在聊天之外有自己的生活（需要先导入世界种子，再用 /story on 或 WebUI 按机器人开启）",
+    "items": {
+      "enabled": {"type": "bool", "description": "故事模块总开关", "hint": "关闭时不唤醒任何故事，也不向聊天注入状态卡。打开后还需按机器人执行 /story on。", "default": false},
+      "provider_id": {"type": "string", "description": "背景模型（主持人）使用的对话模型提供商；留空用 AstrBot 默认对话模型", "hint": "世界设定、主持人笔记，以及最近聊天事件的碎片与摘要会发给这个提供商。", "default": "", "_special": "select_provider"},
+      "actor_provider_id": {"type": "string", "description": "场景中的她使用的对话模型提供商；留空用 AstrBot 默认对话模型", "default": "", "_special": "select_provider"},
+      "base_card": {"type": "text", "description": "场景中她的基础人设；留空时依次取 plugin_only 模式的 persona.base_card、AstrBot 默认人格", "default": ""},
+      "refill_per_day": {"type": "int", "description": "唤醒额度每天回补多少次", "hint": "长期成本上限。一次唤醒最多约 2×轮数+6 次模型调用。", "default": 10, "slider": {"min": 1, "max": 60, "step": 1}},
+      "bucket_capacity": {"type": "int", "description": "唤醒额度最多攒多少次", "default": 30, "slider": {"min": 1, "max": 200, "step": 1}},
+      "max_rounds": {"type": "int", "description": "单次唤醒最多往返几轮", "default": 4, "slider": {"min": 1, "max": 8, "step": 1}},
+      "min_wake_minutes": {"type": "int", "description": "两次唤醒的最小间隔（分钟）", "default": 10},
+      "max_wake_minutes": {"type": "int", "description": "两次唤醒的最长间隔（分钟）；背景模型没预约时也按它", "default": 720},
+      "backfill_min_minutes": {"type": "int", "description": "空白期超过多少分钟才补叙", "default": 30},
+      "tick_seconds": {"type": "int", "description": "故事巡检间隔（秒）", "default": 60},
+      "retry_minutes": {"type": "int", "description": "一场失败后多久重试（分钟）", "default": 30},
+      "max_failures": {"type": "int", "description": "连续失败多少次后自动暂停", "default": 3},
+      "canon_context_items": {"type": "int", "description": "每次唤醒预取给背景模型的相关设定条数", "default": 8},
+      "recent_scenes": {"type": "int", "description": "给背景模型看的最近场景梗概条数", "default": 3},
+      "chat_digest_items": {"type": "int", "description": "给背景模型看的最近聊天事件条数（碎片与摘要）", "hint": "0 表示不把聊天内容发给背景模型。", "default": 5},
+      "notes_max_chars": {"type": "int", "description": "每次带给背景模型的主持人笔记总字数上限", "default": 2000},
+      "card_stale_hours": {"type": "int", "description": "状态卡过了预计结束时间多少小时后不再注入聊天", "default": 6},
+      "chat_boundary": {"type": "bool", "description": "聊天时提醒她只说现状、往事与打算，不把没发生的事说成已经发生", "default": true}
+    }
+  },
   "logging": {
     "type": "object",
     "description": "日志与审计",
@@ -364,7 +389,7 @@
   },
   "bot_overrides": {
     "type": "dict",
-    "description": "按机器人覆盖（键为 bot_id）。可覆盖：persona_mode / base_card / gate_enabled / gate_threshold / gate_question / theta_pre / theta_aux / tts_provider_id / environment_enabled / environment_prompt / qzone_daily_limit / qzone_ugc_right",
+    "description": "按机器人覆盖（键为 bot_id）。可覆盖：persona_mode / base_card / gate_enabled / gate_threshold / gate_question / theta_pre / theta_aux / tts_provider_id / environment_enabled / environment_prompt / qzone_daily_limit / qzone_ugc_right / story_base_card",
     "default": {}
   }
 }

@@ -71,6 +71,21 @@ def test_compact_prompt_has_only_say_line():
     assert "我在 QQ（aiocqhttp）上" in text
 
 
+def test_life_lines_go_last_so_the_stable_prefix_still_caches():
+    plain = make()
+    lines = ["- 我现在在图书馆三楼，正在写课程论文，大概到16:30。", "- 这会儿不太方便看手机。"]
+    text = make(life_lines=lines)
+    assert text.startswith(plain)
+    assert text.endswith("# 我自己这边\n" + "\n".join(lines))
+    assert make(life_lines=[]) == plain and make(life_lines=["", "  "]) == plain
+
+
+def test_life_lines_in_compact_and_disabled():
+    lines = ["- 我现在在车上，正在去机场。"]
+    assert make(compact=True, life_lines=lines).endswith("# 我自己这边\n" + lines[0])
+    assert make(enabled=False, life_lines=lines) == ""
+
+
 def test_say_example_messages_are_valid_tool_pair():
     assistant, tool = say_example_messages("demo")
     assert assistant["role"] == "assistant"

@@ -151,8 +151,10 @@ class Segmenter:
             int(event.get("char_count") or 0) >= cfg.int("memory.big_event_chars", 20000)
             or int(event.get("turn_count") or 0) >= cfg.int("memory.big_event_turns", 80)
         )
+        # 故事场景不是“我与对方的对话”，转录里有旁白，要用专用的整理提示词。
+        story = str(event.get("source") or "") == "story"
         result = await self.textgen.generate_json(
-            prompts.CLOSE_EVENT_SYSTEM,
+            prompts.STORY_EVENT_SYSTEM if story else prompts.CLOSE_EVENT_SYSTEM,
             prompts.CLOSE_EVENT_USER.format(
                 turns=len(turns),
                 chars=int(event.get("char_count") or 0),
@@ -176,6 +178,18 @@ class Segmenter:
             if isinstance(raw_excerpts, list):
                 excerpts = [str(item)[:200] for item in raw_excerpts if str(item).strip()][:5]
 
+        if not fragment and story:
+            # 场景里没有“对方”；整理失败时保留原碎片，没有就退回她最后做的事。
+            last_mine = next(
+                (str(turn["text"]) for turn in reversed(turns) if turn["role"] == "assistant"),
+                "",
+            )
+            fragment = (
+                str(event.get("fragment") or "").strip()
+                or last_mine[:60]
+                or "我过了一段平常的时间"
+            )
+            self.audit.warn("故事事件 %s 碎片生成失败，保留原有内容", event.get("id"))
         if not fragment:
             name = self._peer_name(turns)
             last_user = next(

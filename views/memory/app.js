@@ -135,7 +135,8 @@ function renderDetail(data) {
         const button = canRebuild
           ? `<button class="ghost rebuild-btn" data-rebuild="${row.id}">重建</button>`
           : `<button class="ghost rebuild-btn" disabled title="${title}">重建</button>`;
-        return `<li>${esc(row.fragment || "（未生成）")} <span class="muted">salience ${row.salience ?? "-"}</span>${button}</li>`;
+        const origin = row.source === "story" ? '<span class="chip">故事</span> ' : "";
+        return `<li>${origin}${esc(row.fragment || "（未生成）")} <span class="muted">salience ${row.salience ?? "-"}</span>${button}</li>`;
       },
     )}
     ${section("洞察", data.insights, (row) => `<li>${esc(row.text)}</li>`)}
@@ -190,6 +191,9 @@ async function refreshAll() {
     }
     if (!$("panel-settings").classList.contains("hidden")) {
       await loadSettings();
+    }
+    if (!$("panel-story").classList.contains("hidden")) {
+      await loadStory();
     }
     toast("已刷新");
   } catch (error) {
@@ -331,6 +335,7 @@ async function runImport() {
     toast(`导入完成：${JSON.stringify(data.counts)}${data.backup ? "；备份 " + data.backup : ""}`);
     $("import-dialog").close();
     await loadOverview();
+    if (!$("panel-story").classList.contains("hidden")) await loadStory();
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -418,6 +423,103 @@ async function loadSettings() {
   }
 }
 
+function clock(ms) {
+  if (!ms) return "—";
+  const date = new Date(Number(ms));
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function storyState(row, masterEnabled) {
+  if (!masterEnabled) return ['<span class="chip off">总开关未开</span>', false];
+  if (!row.enabled) return ['<span class="chip off">未开启</span>', false];
+  if (row.paused) return [`<span class="chip warn">已暂停：${esc(row.pause_reason || "未说明")}</span>`, true];
+  if (row.running) return ['<span class="chip">正在演一场</span>', true];
+  return ['<span class="chip">运行中</span>', true];
+}
+
+function renderStory(data) {
+  $("story-master").textContent = data.master_enabled
+    ? "总开关已开。每个机器人还需要各自开启。"
+    : "总开关未开：先在插件配置里打开 story.enabled，下面的开关才会生效。";
+  const list = $("story-list");
+  const bots = data.bots || [];
+  if (!bots.length) {
+    list.innerHTML = '<p class="muted">还没有机器人。</p>';
+    return;
+  }
+  list.innerHTML = bots
+    .map((row) => {
+      const [chip, active] = storyState(row, data.master_enabled);
+      const card = (row.card_lines || []).map((line) => String(line).replace(/^-\s*/, "")).join(" ");
+      const canon = row.canon || {};
+      const scenes = (row.scenes || [])
+        .map((scene) => {
+          const body =
+            scene.status === "ok"
+              ? esc(scene.fragment || "（没有记下什么）")
+              : `<span class="warn">没演成：${esc(scene.error || "未知原因")}</span>`;
+          const meta = `${scene.cause === "manual" ? "手动 · " : ""}${scene.rounds} 轮 · ${scene.calls} 次调用${scene.salience ? " · salience " + scene.salience : ""}`;
+          return `<li>${clock(scene.started_at)} ${body} <span class="muted">${meta}</span></li>`;
+        })
+        .join("");
+      const problems = (row.problems || []).length
+        ? `<p class="warn">还缺：${(row.problems || []).map(esc).join("；")}</p>`
+        : "";
+      return `
+      <div class="story-card" data-bot="${esc(row.bot_id)}">
+        <div class="story-head">
+          <div class="story-name">${esc(row.bot_id)} ${chip}</div>
+          <div class="detail-actions">
+            <button class="ghost" data-story="${row.enabled ? "off" : "on"}">${row.enabled ? "关闭" : "开启"}</button>
+            <button class="ghost" data-story="${row.paused ? "resume" : "pause"}" ${row.enabled ? "" : "disabled"}>${row.paused ? "继续" : "暂停"}</button>
+            <button data-story="wake" ${row.enabled && !row.running ? "" : "disabled"} title="不消耗唤醒额度">立即演一场</button>
+            <button class="ghost" data-story-import>导入世界种子</button>
+            <button class="ghost" data-story-export title="含完整转录、设定集和主持人笔记">导出故事数据</button>
+          </div>
+        </div>
+        <div class="story-facts">
+          <div><b>世界</b>${row.has_seed ? esc(row.world_title || "（未命名）") : '<span class="warn">还没有导入世界种子</span>'}</div>
+          <div><b>人设来源</b>${row.base_card_source ? `${esc(row.base_card_source)}（${row.base_card_chars} 字）` : '<span class="warn">没有取到</span>'}</div>
+          <div><b>唤醒额度</b>${row.tokens} / ${row.capacity}（每天回补 ${row.refill_per_day}）</div>
+          <div><b>下次唤醒</b>${active ? clock(row.next_wake_at) : "—"}</div>
+          <div><b>状态卡</b>${card ? esc(card) : '<span class="muted">没有或已过期</span>'}</div>
+          <div><b>累计</b>${row.scenes_total} 场 · 设定 ${canon.seed ?? 0}+${canon.play ?? 0} · 笔记 ${row.notes}</div>
+        </div>
+        ${problems}
+        <h3>最近的场景（她记下的）</h3>
+        ${scenes ? `<ul>${scenes}</ul>` : '<p class="muted">（还没有）</p>'}
+      </div>`;
+    })
+    .join("");
+}
+
+async function loadStory() {
+  try {
+    renderStory(await apiGet("story"));
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+const STORY_ACTION_DONE = {
+  on: "故事已开启",
+  off: "故事已关闭，已有的记忆和设定都还在",
+  pause: "故事已暂停",
+  resume: "故事继续",
+  wake: "开始演了，通常要一两分钟，稍后点刷新看结果",
+};
+
+async function storyAction(bot, action) {
+  try {
+    await apiPost("story/action", { bot, action });
+    toast(STORY_ACTION_DONE[action] || "好了");
+  } catch (error) {
+    toast(error.message, true);
+  }
+  await loadStory();
+}
+
 async function loadOverview() {
   try {
     const data = await apiGet("overview");
@@ -437,7 +539,9 @@ function switchTab(name) {
   });
   $("panel-overview").classList.toggle("hidden", name !== "overview");
   $("panel-settings").classList.toggle("hidden", name !== "settings");
+  $("panel-story").classList.toggle("hidden", name !== "story");
   if (name === "settings") loadSettings();
+  if (name === "story") loadStory();
 }
 
 document.addEventListener("click", (event) => {
@@ -446,6 +550,25 @@ document.addEventListener("click", (event) => {
   if (target.closest("#refresh")) {
     void refreshAll();
     return;
+  }
+  const storyCard = target.closest(".story-card");
+  if (storyCard) {
+    const bot = storyCard.dataset.bot;
+    const action = target.closest("[data-story]");
+    if (action && !action.disabled) {
+      void storyAction(bot, action.dataset.story);
+      return;
+    }
+    if (target.closest("[data-story-import]")) {
+      openImport(bot);
+      return;
+    }
+    if (target.closest("[data-story-export]")) {
+      if (window.confirm("导出的文件包含完整转录、设定集和主持人笔记，会剧透。继续吗？")) {
+        void exportBot(bot, "story");
+      }
+      return;
+    }
   }
   const rebuild = target.closest("[data-rebuild]");
   if (rebuild && !rebuild.disabled) {

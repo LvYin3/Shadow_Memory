@@ -126,6 +126,21 @@ async def test_preview_counts(env):
     assert result["media"]["files"] == 1
 
 
+async def test_transfer_keeps_event_source(env):
+    await seed_bot(env)
+    await env.stack.db.execute(
+        "UPDATE events SET source='story' WHERE bot_id='bot1' AND fragment LIKE '周末%'"
+    )
+    await env.service.execute("bot1", "bot2", ["events"], "merge")
+    rows = await env.stack.db.fetchall(
+        "SELECT fragment, source FROM events WHERE bot_id='bot2'"
+    )
+    assert {row["fragment"]: row["source"] for row in rows} == {
+        "第一次见面是在雨天，她借了我一把伞": "chat",
+        "周末一起去看海，风很大": "story",
+    }
+
+
 async def test_merge_copies_and_is_idempotent(env):
     await seed_bot(env)
     await add_media(env)

@@ -173,6 +173,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
         },
     },
     "memo": {"enabled": True, "catalog_days": 7, "catalog_limit": 10},
+    "story": {
+        "enabled": False,
+        "provider_id": "",
+        "actor_provider_id": "",
+        "base_card": "",
+        "refill_per_day": 10,
+        "bucket_capacity": 30,
+        "max_rounds": 4,
+        "min_wake_minutes": 10,
+        "max_wake_minutes": 720,
+        "backfill_min_minutes": 30,
+        "tick_seconds": 60,
+        "retry_minutes": 30,
+        "max_failures": 3,
+        "canon_context_items": 8,
+        "recent_scenes": 3,
+        "chat_digest_items": 5,
+        "notes_max_chars": 2000,
+        "card_stale_hours": 6,
+        "chat_boundary": True,
+    },
     "logging": {"retention_days": 90, "debug": False},
     "bot_overrides": {},
 }
@@ -191,6 +212,7 @@ OVERRIDE_PATHS: dict[str, str] = {
     "environment_prompt": "interaction.environment.prompt",
     "qzone_daily_limit": "interaction.qzone.daily_limit",
     "qzone_ugc_right": "interaction.qzone.ugc_right",
+    "story_base_card": "story.base_card",
 }
 
 

@@ -397,7 +397,8 @@ class MemoryService:
         facts = await self.facts._active_rows(bot_id, 500)  # noqa: SLF001 - 内部导出
         events = await self.db.fetchall(
             "SELECT id, kind, fragment, summary, entities, salience, storage_strength, "
-            "retrievability, status, ended_at FROM events WHERE bot_id=? ORDER BY id DESC LIMIT 500",
+            "retrievability, status, ended_at, source FROM events WHERE bot_id=? "
+            "ORDER BY id DESC LIMIT 500",
             (bot_id,),
         )
         insights = await self.db.fetchall(

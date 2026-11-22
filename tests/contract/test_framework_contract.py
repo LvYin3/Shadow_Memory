@@ -127,6 +127,21 @@ def test_context_and_provider_lookup_contract():
         assert name in text, name
 
 
+def test_story_module_contract():
+    """故事模块直接调 provider、读默认人格，这些接口要还在。"""
+    provider = read("astrbot/core/provider/provider.py")
+    assert "async def text_chat" in provider
+    for name in ("prompt", "system_prompt", "contexts"):
+        assert name in provider
+    assert "completion_text" in read("astrbot/core/provider/entities.py")
+    context = read("astrbot/core/star/context.py")
+    assert "self.persona_manager = persona_manager" in context
+    persona = read("astrbot/core/persona_mgr.py")
+    assert "async def get_default_persona_v3" in persona
+    assert "DEFAULT_PERSONALITY = Personality(" in persona
+    assert 'prompt="You are a helpful and friendly assistant."' in persona
+
+
 def test_tts_provider_contract():
     text = read("astrbot/core/provider/provider.py")
     assert "class TTSProvider" in text
@@ -211,6 +226,14 @@ def test_plugin_source_uses_expected_hooks():
         "rebuild_event",
         "on_event_closed",
         "ambient_text",
+        '@filter.command("story")',
+        "_story_loop",
+        "self.story.tick()",
+        "life_lines=life_lines",
+        "_resolve_story_provider",
+        "_resolve_base_card",
+        "get_default_persona_v3",
+        "story/action",
     ):
         assert snippet in main_text, snippet
     db_text = (PLUGIN / "core" / "db.py").read_text(encoding="utf-8")

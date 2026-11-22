@@ -96,8 +96,39 @@ AstrBot cron 唤醒不触发 `on_llm_request`，所以备忘轮到点时靠 `mem
 - 提醒内容、现在、人格、会话目录、最近对话、第一人称环境；
 - 不会自动走普通请求的召回注入。
 
+## 故事模块
+
+配置与用法见 [CONFIG.md](CONFIG.md#故事模块)。先看 `/story status`（或 WebUI「故事」页签），它会直接列出「还缺」什么。
+
+**故事不动时依次检查：**
+
+1. `故事：总开关未开` → 配置里的 `story.enabled`，改完要重载插件；
+2. `故事：未开启` → `/story on`；被拒绝时提示里写了缺什么（世界种子、基础人设、对话模型）；
+3. `故事：已暂停（连续 3 次失败……）` → 看下面的失败原因，处理后 `/story resume`；
+4. `唤醒额度` 不足 1 → 正常静默，等回补；`下次唤醒` 会显示攒够的时间；
+5. `下次唤醒` 还没到 → 背景模型上一场预约的时间；想马上演用 `/story wake`；
+6. 巡检每 `story.tick_seconds` 秒一次，插件启动后约 20 秒才开始。
+
+**一场没演成：**
+
+- WebUI「最近的场景」和 `/story status` 的「最近一场」会显示失败原因；
+- 常见原因：`输出不是 JSON 对象`（模型没按格式输出，可以换一个更听指令的模型）、`输出缺少必填内容`（没给叙述、行动或状态卡）、`调用失败`（网络或限流）；每次调用失败会先重试一次；
+- 失败的场景不进记忆、不扣额度，已经走到哪一步留在 `story_scenes.transcript` 里（导出故事数据可见）。
+
+**日志：**
+
+- INFO：`story_scene`（一场演完：轮数、调用次数、掷骰次数、显著度、新增设定、下次唤醒间隔、剩余额度）、`story_wait_tokens`、`story_enabled` / `story_disabled` / `story_paused` / `story_resumed`、`story_seed_imported`；
+- WARN：`故事场景失败`、`故事模型调用失败`、`故事模型输出不是 JSON 对象`、`故事模块配置的 provider 不可用`；
+- ERROR：`故事连续 N 次失败，已自动暂停`；
+- DEBUG：`story_llm`（每次调用的角色与字数）、`environment_injected` 的 `story_lines`（状态卡注入了几行）。
+
+**她在聊天里不提自己的生活：** 状态卡只是背景，不要求她主动说。确认 `environment_injected` 的 `story_lines > 0`；为 0 说明故事没开、状态卡已过期超过 `card_stale_hours`，或关了 `interaction.environment`。
+
+**故事事件在哪：** 「概览」的事件列表里带「故事」标记的就是。它们可以像聊天事件一样 `/forget`、重建；重建时用的是故事专用的整理提示词。
+
 ## 备份与恢复
 
+- WebUI 故事页签「导出故事数据」：世界种子、设定集、主持人笔记、全部场景转录（含剧透）；目前只能导出，不能整体导回；
 - `/memory export full`：人格、活跃事实、事件；不含媒体、insights、excerpts；
 - `/memory export seed`：小规模初始人格；
 - `/memory restore <文件> [force]`：恢复 full；
@@ -118,6 +149,11 @@ AstrBot cron 唤醒不触发 `on_llm_request`，所以备忘轮到点时靠 `mem
 | `/forget <event_id>` | 删除事件 |
 | `/persona rollback <version>` | 回滚人格 |
 | `/qzone <正文>` | 发说说 |
+| `/story` 或 `/story status` | 故事状态 |
+| `/story import <文件>` | 导入世界种子（文件放 `seed/` 目录） |
+| `/story on` / `off` | 开启 / 关闭当前机器人的故事 |
+| `/story pause` / `resume` | 暂停 / 继续 |
+| `/story wake` | 立刻演一场（不消耗额度） |
 
 ### 工具
 
@@ -141,7 +177,7 @@ $env:PYTHONPATH=".pydeps"
 ```
 
 - `tests/unit/`：模块与纯逻辑；
-- `tests/integration/`：整条记忆链路；
+- `tests/integration/`：整条记忆链路；`test_story_main_wiring.py` 用 AstrBot 替身把 `main.py` 真正导入并跑一遍故事的接线；
 - `tests/contract/`：AstrBot 接口与工具 schema；
 - `tests/live/`：可选的真实模型冒烟。
 

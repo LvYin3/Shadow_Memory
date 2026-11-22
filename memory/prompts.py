@@ -36,6 +36,56 @@ CLOSE_EVENT_USER = """对话（{turns} 轮，约 {chars} 字）：
 
 CLOSE_EVENT_SCHEMA = '{"fragment": string, "entities": string[], "summary": string|null, "excerpts": string[]|null}'
 
+# --------------------------------------------------------------------- 故事场景关闭
+# 场景不是“我与对方的对话”：转录里有旁白，直接套用上面的提示词会写出“旁白说……”。
+STORY_EVENT_SYSTEM = """你是一个人的记忆整理器。这是“我”刚经历的一段自己的生活，不是聊天。
+转录里“旁白”写的是我当时看到、听到、感觉到的，旁白里的“你”就是我；“我”后面是我当时心里想的和做的事。
+
+规则：
+- 第一人称，像自己回想，不像报告；
+- 旁白不是一个人，不要写“旁白说”；旁白里发生的事，直接写成我经历的事；
+- 别人做的事、说的话，用转录里出现的名字或称呼；
+- 只写这一段里真正发生过的事，不写形容词堆砌，不写“最近/前几天”这类相对时间；
+- 碎片是一条完整的短句，不超过 60 个汉字；
+- 实体是这个片段里值得以后联想到的具体名词（人名、地点、物品、话题），3 到 8 个，去重；
+- 摘要不超过 200 字，保留经过与结果；
+- 不要输出任何解释。"""
+
+STORY_EVENT_USER = """{backfill_block}这一段的经过：
+{transcript}
+
+请输出 JSON：
+{{
+  "fragment": "≤60字的第一人称碎片",
+  "entities": ["实体1", "实体2", "实体3"],
+  "summary": "≤200字",
+  "backfill_fragment": "{backfill_hint}"
+}}"""
+
+STORY_BACKFILL_BLOCK = """在这之前有一段平淡带过的空白：
+{backfill}
+
+"""
+STORY_BACKFILL_HINT = "把那段空白写成一条 ≤50 字的第一人称碎片"
+STORY_NO_BACKFILL_HINT = "留空字符串"
+
+STORY_EVENT_SCHEMA = (
+    '{"fragment": string, "entities": string[], "summary": string, '
+    '"backfill_fragment": string}'
+)
+
+STORY_SALIENCE_INSTRUCTION = (
+    "How significant is this stretch of my own life for me? 1 means an uneventful routine "
+    "I would forget by tomorrow; 5 means something that changes how I see someone or myself."
+)
+STORY_SALIENCE_LEVELS = [
+    "1 无足轻重：按部就班的日常，明天就忘",
+    "2 寻常：普通的一天里记得住的小事",
+    "3 有点意思：有新鲜事或情绪起伏",
+    "4 重要：触及关系、承诺或明显的得失",
+    "5 很重：改变我对某个人或自己的看法",
+]
+
 # --------------------------------------------------------------------- 夜间巩固
 CONSOLIDATE_SYSTEM = """你是一个人的记忆整理器，正在把几段相似的经历并成一条更概括的印象。
 

@@ -46,6 +46,7 @@
 - **记忆**：事件、事实、关系边、遗忘曲线、张力、人格三层、夜间巩固、人格蒸馏。
 - **交互**：群聊门控、`say / speak / silent` 分段回复、最终文本拦截、TTS、固定上下文、第一人称环境。
 - **生活**：笔记、备忘提醒、图片库、发图、QQ 空间。
+- **故事（可选，默认关闭）**：按你写的世界设定，让她在聊天之外按现实时间过自己的日子，经历过的事进入记忆。见下文「故事模块」。
 - **运维**：WebUI 记忆总览、导入导出、转移、`/memory` 审计命令、人格回滚。
 - **初始人格**：`skills/persona-seed/`，把口述过去整理成可导入的 seed。
 
@@ -60,7 +61,7 @@
 ```text
 data/plugin_data/shadow_memory/
   memory.db       SQLite（WAL）
-  seed/           persona_seed JSON
+  seed/           persona_seed / 世界种子 JSON
   exports/        导出与备份
   qzone_media/
     <bot_id>/     按机器人隔离的图片库
@@ -90,6 +91,31 @@ data/plugin_data/shadow_memory/
 
 完整配置见 [docs/CONFIG.md](docs/CONFIG.md)。
 
+## 故事模块
+
+让角色不只活在聊天记录里。你写一份「世界种子」（她生活在哪、周围有谁、日子是什么基调），插件用一个「背景模型」当主持人，按现实时间一场一场地推进她的日常：
+
+- 时间与现实同步；她手里的 QQ 就是这个世界里的手机，你是手机那头的人；
+- 每一场里，背景模型只负责写她看到听到的事、裁定结果，她自己决定怎么想、怎么做；结果有悬念时由程序掷骰，不由模型说了算；
+- 每场结束留下一张状态卡（在哪、在做什么、到几点、方不方便看手机），聊天时她就知道自己此刻的处境；
+- 经历过的事写进记忆，和聊天记忆一样会被想起、遗忘、巩固，并参与人格蒸馏。
+
+目前是第一段「独处的生活」：她不会主动给你发消息，也没有独立的配角。
+
+```text
+1. 把世界种子放到 data/plugin_data/shadow_memory/seed/（示例：docs/world_seed.example.json）
+2. 配置里打开 story.enabled，重载插件
+3. 私聊：/story import <文件名>  →  /story on  →  /story status
+```
+
+**开启前请了解：**
+
+- **花费**：默认每天最多 10 次唤醒，每次最多 14 次模型调用（上限约 140 次／天），可在配置里调低；
+- **隐私**：世界设定、主持人笔记和最近聊天事件的摘要会发给背景模型所用的 provider；`story.chat_digest_items = 0` 可以不发聊天摘要；
+- **人格**：故事事件会参与人格蒸馏。建议开启后隔几天看一眼人格有没有被带偏，不合适可以 `/story off` 并用 `/persona rollback` 回滚。
+
+配置、世界种子格式和排障见 [docs/CONFIG.md](docs/CONFIG.md#故事模块)、[docs/DEBUG.md](docs/DEBUG.md#故事模块)。
+
 ## 常用命令
 
 管理员 + 仅私聊：
@@ -104,6 +130,7 @@ data/plugin_data/shadow_memory/
 | `/forget <event_id>` | 删除一条事件 |
 | `/persona rollback <version>` | 回滚人格版本 |
 | `/qzone <正文>` | 手动发一条说说 |
+| `/story [status \| on \| off \| pause \| resume \| wake \| import <文件>]` | 故事模块的状态与开关 |
 
 ## 工具
 
@@ -125,7 +152,8 @@ data/plugin_data/shadow_memory/
 - 记忆转移、导入/导出；
 - 按 bot 设置 TTS 与固定上下文；
 - 重建/刷新事件；
-- 常驻背景只读展示。
+- 常驻背景只读展示；
+- 「故事」页签：按机器人开关、暂停、手动演一场，查看唤醒额度、状态卡和她记下的最近几场，导入世界种子、导出故事数据。
 
 改完插件代码或新增视图后需要**重载插件**，只刷新页面不够。
 

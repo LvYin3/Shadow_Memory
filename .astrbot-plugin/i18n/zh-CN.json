@@ -7,7 +7,7 @@
   "views": {
     "memory": {
       "title": "记忆总览",
-      "description": "查看各机器人记忆状态、转移记忆、导入导出 full/seed，并配置 TTS 与固定上下文。"
+      "description": "查看各机器人记忆状态、转移记忆、导入导出 full/seed，配置 TTS 与固定上下文，并管理故事模块。"
     }
   }
 }

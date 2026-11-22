@@ -270,6 +270,7 @@ def validate_full(data: Any) -> dict[str, Any]:
                 "retrievability": _number(row.get("retrievability"), 1.0),
                 "status": str(row.get("status") or "closed"),
                 "ended_at": ended,
+                "source": "story" if str(row.get("source") or "") == "story" else "chat",
             }
         )
 
@@ -560,8 +561,9 @@ class SeedService:
                 new_id = await self.db.execute(
                     "INSERT INTO events(bot_id, umo, kind, started_at, ended_at, participants, "
                     "turn_count, char_count, fragment, summary, entities, source_event_ids, "
-                    "storage_strength, retrievability, last_recalled_at, salience, status, created_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?)",
+                    "storage_strength, retrievability, last_recalled_at, salience, status, "
+                    "source, created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?,?,?,?)",
                     (
                         bot_id,
                         "",
@@ -579,6 +581,7 @@ class SeedService:
                         ended,
                         event["salience"],
                         event["status"],
+                        event["source"],
                         ended,
                     ),
                 )

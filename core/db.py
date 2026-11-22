@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Sequence
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -322,6 +322,67 @@ CREATE TABLE IF NOT EXISTS session_messages (
   text TEXT NOT NULL,
   ts INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS story_state (
+  bot_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  paused INTEGER NOT NULL DEFAULT 0,
+  pause_reason TEXT,
+  tokens REAL NOT NULL DEFAULT 0,
+  tokens_at INTEGER NOT NULL DEFAULT 0,
+  card TEXT,
+  next_wake_at INTEGER,
+  last_scene_at INTEGER,
+  failures INTEGER NOT NULL DEFAULT 0,
+  world_title TEXT,
+  outline TEXT,
+  seed_meta TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS story_scenes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  cause TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  ended_at INTEGER,
+  rounds INTEGER NOT NULL DEFAULT 0,
+  calls INTEGER NOT NULL DEFAULT 0,
+  seed TEXT,
+  rolls TEXT,
+  transcript TEXT,
+  backfill TEXT,
+  summary TEXT,
+  salience INTEGER,
+  event_id INTEGER,
+  backfill_event_id INTEGER,
+  error TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS story_canon (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  origin TEXT NOT NULL CHECK (origin IN ('seed', 'play')),
+  category TEXT NOT NULL DEFAULT 'other',
+  name TEXT NOT NULL,
+  body TEXT NOT NULL,
+  scene_id INTEGER,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS story_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  scene_id INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (bot_id, title)
+);
 """
 
 DDL_INDEXES = """
@@ -353,6 +414,10 @@ CREATE INDEX IF NOT EXISTS idx_qzone_logs_bot_time ON qzone_logs(bot_id, created
 CREATE INDEX IF NOT EXISTS idx_media_items_bot_time ON media_items(bot_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_media_logs_bot_time ON media_logs(bot_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_session_messages ON session_messages(bot_id, umo, id);
+CREATE INDEX IF NOT EXISTS idx_events_source ON events(bot_id, source, ended_at);
+CREATE INDEX IF NOT EXISTS idx_story_scenes_bot ON story_scenes(bot_id, id);
+CREATE INDEX IF NOT EXISTS idx_story_canon_bot ON story_canon(bot_id, origin);
+CREATE INDEX IF NOT EXISTS idx_story_notes_bot ON story_notes(bot_id, updated_at);
 """
 
 

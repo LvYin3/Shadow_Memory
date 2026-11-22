@@ -6,7 +6,8 @@
 - ``register_web_api``：WebUI 的概览 / 明细 / 设置 / 转移 / 导入导出；
 - ``on_llm_response``：记录缓存用量与回复文本；
 - ``on_decorating_result``：丢弃最终文本并触发 post_turn；
-- ``llm_tool``：say / speak / silent / notes / memo / media / send_image / qzone / memory_search。
+- ``llm_tool``：say / speak / silent / notes / memo / media / send_image / qzone / memory_search；
+- 故事模块（``story/``）：后台循环巡检到期的唤醒，状态卡并入交流环境块，``/story`` 管理命令。
 """
 
 from __future__ import annotations
@@ -77,6 +78,11 @@ from .memory.seed import SeedError, SeedService
 from .memory.segmenter import Segmenter
 from .memory.service import MemoryService
 from .memory.transfer import TransferError, TransferService
+from .story.director import Director
+from .story.llm import ROLE_GM, StoryLLM
+from .story.service import StoryError, StoryService
+from .story.store import StoryStore
+from .story.world import WorldSeedError
 from .webui.service import WebUIError, WebUIService
 
 PENDING_KEY = "shadow_memory_pending"
@@ -108,6 +114,7 @@ class Main(Star):
         self.kv: KvStore | None = None
         self.session_buffer: SessionBuffer | None = None
         self.webui: WebUIService | None = None
+        self.story: StoryService | None = None
         self.audit = Audit(
             logger,
             debug=ConfigView(self.astrbot_config, "").bool("logging.debug", False),
@@ -139,6 +146,7 @@ class Main(Star):
         await self._reconcile_memos()
         self._bg_tasks.append(asyncio.create_task(self._worker_loop(), name="pm-worker"))
         self._bg_tasks.append(asyncio.create_task(self._sweeper_loop(), name="pm-sweeper"))
+        self._bg_tasks.append(asyncio.create_task(self._story_loop(), name="pm-story"))
         await self._refresh_media_tools()
         self.audit.event("plugin_ready", data_dir=str(self.data_dir))
 
@@ -251,6 +259,24 @@ class Main(Star):
         )
         media_transfer = MediaTransfer(db, self.media_lib, self.data_dir)
         transfer = TransferService(db, configs, persona, edges, media_transfer, audit)
+        story_store = StoryStore(db)
+        story_llm = StoryLLM(self._resolve_story_provider, audit)
+        self.story = StoryService(
+            configs=configs,
+            store=story_store,
+            director=Director(
+                db=db,
+                configs=configs,
+                store=story_store,
+                memory=self.memory,
+                llm=story_llm,
+                audit=audit,
+                base_card=self._resolve_base_card,
+            ),
+            llm=story_llm,
+            audit=audit,
+            base_card=self._resolve_base_card,
+        )
         self.webui = WebUIService(
             db,
             configs,
@@ -263,6 +289,7 @@ class Main(Star):
             audit,
             tts_providers=self._list_tts_providers,
             platform_ids=self._list_platform_ids,
+            story=self.story,
         )
 
     # ------------------------------------------------------------------ WebUI
@@ -329,6 +356,8 @@ class Main(Star):
             ("transfer", self.web_transfer, ["POST"], "execute transfer"),
             ("export", self.web_export, ["GET"], "export memory"),
             ("import", self.web_import, ["POST"], "import memory"),
+            ("story", self.web_story, ["GET"], "story overview"),
+            ("story/action", self.web_story_action, ["POST"], "story action"),
         ]
         registered: list[str] = []
         for name in sorted(names):
@@ -498,6 +527,46 @@ class Main(Star):
         except Exception as exc:  # noqa: BLE001
             return self._web_error(exc)
 
+    async def web_story(self):
+        if not self._web_user():
+            return error_response("未登录", 401)
+        if self.webui is None:
+            return error_response("插件还没准备好", 503)
+        try:
+            return json_response(await self.webui.story_overview())
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_story_action(self):
+        if not self._web_user():
+            return error_response("未登录", 401)
+        if self.webui is None:
+            return error_response("插件还没准备好", 503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", 400)
+        try:
+            action = str(payload.get("action") or "")
+            result = await self.webui.story_action(str(payload.get("bot") or ""), action)
+            if action == "wake":
+                # 一场要一两分钟，放到后台演；结果在“最近的场景”里看。
+                task = asyncio.create_task(self._safe_story_wake(str(result["bot_id"])))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+            return json_response(result)
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def _safe_story_wake(self, bot_id: str) -> None:
+        if self.story is None:
+            return
+        try:
+            await self.story.wake(bot_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 失败已记在场景记录里
+            self.audit.warn("手动唤醒故事失败 %s：%s", bot_id, exc)
+
     # ------------------------------------------------------------------ 作业
     async def _register_jobs(self) -> None:
         if self._jobs_registered:
@@ -613,6 +682,19 @@ class Main(Star):
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.audit.warn("空闲事件巡检失败：%s", exc)
+
+    async def _story_loop(self) -> None:
+        """巡检到期的故事唤醒。预约存在库里，重启后过期的预约会在这里被接上（走补叙）。"""
+        await asyncio.sleep(20)  # 等平台和 provider 加载完
+        while True:
+            try:
+                if self.story is not None:
+                    await self.story.tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("故事巡检失败：%s", exc)
+            await asyncio.sleep(self.cfg("").int("story.tick_seconds", 60, lo=10, hi=3600))
 
     # ------------------------------------------------------------------ 钩子
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100)
@@ -990,6 +1072,7 @@ class Main(Star):
         if not cfg.bool("interaction.environment.enabled", True):
             return
         chat_type, group_name, group_id = self._chat_scene(event)
+        life_lines = await self._story_lines(event.get_platform_id())
         block = build_environment_prompt(
             platform=event.get_platform_name(),
             chat_type=chat_type,
@@ -997,6 +1080,7 @@ class Main(Star):
             group_id=group_id,
             sender_name=event.get_sender_name() or "",
             rules=cfg.str("interaction.environment.prompt", "").strip(),
+            life_lines=life_lines,
         )
         if not block:
             return
@@ -1007,8 +1091,19 @@ class Main(Star):
             bot_id=event.get_platform_id(),
             chat_type=chat_type,
             chars=len(block),
+            story_lines=len(life_lines),
             preview=block.replace("\n", " | ")[:180],
         )
+
+    async def _story_lines(self, bot_id: str) -> list[str]:
+        """故事模块给聊天侧的状态卡行；没开或读不到就什么也不加。"""
+        if self.story is None:
+            return []
+        try:
+            return await self.story.chat_lines(bot_id)
+        except Exception as exc:  # noqa: BLE001 - 状态卡读不到不能打断对话
+            self.audit.warn("读取故事状态卡失败：%s", exc)
+            return []
 
     def _ltm_settings(self, umo: str) -> dict[str, Any]:
         try:
@@ -1655,6 +1750,64 @@ class Main(Star):
         except Exception:  # noqa: BLE001
             return None
 
+    async def _resolve_story_provider(self, role: str, bot_id: str) -> Any:
+        """故事模块的对话模型：背景模型用 story.provider_id，场景中的她用 story.actor_provider_id。
+
+        配了 ID 却找不到时返回 None，不悄悄换成默认模型：世界设定和聊天摘要
+        会发给这个 provider，发到哪里应该由配置说了算。
+        """
+        cfg = self.cfg(bot_id)
+        key = "story.provider_id" if role == ROLE_GM else "story.actor_provider_id"
+        provider_id = cfg.str(key).strip()
+        if provider_id:
+            provider = self.context.get_provider_by_id(provider_id)
+            if provider is not None and hasattr(provider, "text_chat"):
+                return provider
+            self.audit.warn("故事模块配置的 provider 不可用：%s=%s", key, provider_id)
+            return None
+        try:
+            return await self.context.get_using_provider_async("")
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("取默认对话模型失败：%s", exc)
+            return None
+
+    async def _resolve_base_card(self, bot_id: str) -> tuple[str, str]:
+        """场景中她的基础人设与来源。
+
+        顺序：story.base_card → plugin_only 模式下的 persona.base_card → AstrBot 默认人格。
+        AstrBot 内置的通用默认人格（“helpful assistant”）不算人设。
+        """
+        cfg = self.cfg(bot_id)
+        text = cfg.str("story.base_card").strip()
+        if text:
+            return text, "story.base_card"
+        if cfg.str("persona.mode", "append") == "plugin_only":
+            text = cfg.str("persona.base_card").strip()
+            if text:
+                return text, "persona.base_card"
+        try:
+            persona = await self.context.persona_manager.get_default_persona_v3()
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("读取 AstrBot 默认人格失败：%s", exc)
+            return "", ""
+        builtin_prompt = "You are a helpful and friendly assistant."
+        try:
+            from astrbot.core.persona_mgr import DEFAULT_PERSONALITY
+
+            if persona is DEFAULT_PERSONALITY:
+                return "", ""
+            builtin_prompt = str(DEFAULT_PERSONALITY.get("prompt") or builtin_prompt)
+        except Exception:  # noqa: BLE001 - 取不到内置人格时按文本比对
+            pass
+        try:
+            prompt = str(persona.get("prompt") or "").strip()
+            name = str(persona.get("name") or "").strip()
+        except Exception:  # noqa: BLE001
+            return "", ""
+        if not prompt or prompt == builtin_prompt:
+            return "", ""
+        return prompt, f"AstrBot 默认人格「{name or '未命名'}」"
+
     async def _resolve_vision_provider(self, bot_id: str, umo: str) -> Any:
         cfg = self.cfg(bot_id)
         try:
@@ -1951,6 +2104,7 @@ class Main(Star):
                     sender_name=event.get_sender_name() or "",
                     rules=cfg.str("interaction.environment.prompt", "").strip(),
                     compact=True,
+                    life_lines=await self._story_lines(bot_id),
                 )
                 if environment:
                     self.audit.debug(
@@ -2284,7 +2438,110 @@ class Main(Star):
         )
         yield event.plain_result(str(result.get("message") or ""))
 
+    @filter.command("story")
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def story_cmd(self, event: AstrMessageEvent):
+        """查看或管理当前机器人的故事（仅管理员、仅私聊）。"""
+        if not await self._admin_private(event):
+            yield event.plain_result("这个命令只能在私聊里用。")
+            return
+        if self.story is None:
+            yield event.plain_result("故事模块还没准备好。")
+            return
+        bot_id = event.get_platform_id()
+        parts = self._command_args(event, "story").split()
+        action = parts[0].lower() if parts else "status"
+        usage = "用法：/story [status | on | off | pause | resume | wake | import <文件>]"
+        try:
+            if action == "status":
+                yield event.plain_result(self._format_story(await self.story.status(bot_id)))
+                return
+            if action == "import":
+                if len(parts) < 2:
+                    yield event.plain_result("用法：/story import <文件名>（文件放在 seed 目录）")
+                    return
+                result = await self.story.import_seed(bot_id, self._read_seed(parts[1]))
+                yield event.plain_result(
+                    f"世界种子已导入：「{result['title'] or '未命名'}」，"
+                    f"设定 {result['entries']} 条，主线钩子 {result['hooks']} 条。"
+                )
+                return
+            if action == "on":
+                status = await self.story.enable(bot_id)
+                yield event.plain_result("故事开启了。\n" + self._format_story(status))
+                return
+            if action == "off":
+                await self.story.disable(bot_id)
+                yield event.plain_result("故事关掉了；已有的记忆和设定都还在。")
+                return
+            if action == "pause":
+                await self.story.pause(bot_id)
+                yield event.plain_result("故事暂停了；/story resume 继续。")
+                return
+            if action == "resume":
+                status = await self.story.resume(bot_id)
+                yield event.plain_result("故事继续。\n" + self._format_story(status))
+                return
+            if action == "wake":
+                yield event.plain_result("开始演一场，通常要一两分钟……")
+                result = await self.story.wake(bot_id)
+                yield event.plain_result(
+                    f"演完了：{result.rounds} 轮，{result.calls} 次模型调用，显著度 {result.salience}。\n"
+                    f"她记下的：{result.fragment}\n"
+                    f"下次唤醒：{clock_mod.iso(result.next_wake_at)}"
+                )
+                return
+        except (StoryError, WorldSeedError, SeedError) as exc:
+            yield event.plain_result(f"没成：{exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            yield event.plain_result(f"出错了：{exc}")
+            return
+        yield event.plain_result(usage)
+
     # ------------------------------------------------------------------ 辅助
+    @staticmethod
+    def _format_story(data: dict[str, Any]) -> str:
+        if not data.get("master_enabled"):
+            switch = "总开关未开"
+        elif not data.get("enabled"):
+            switch = "未开启"
+        elif data.get("paused"):
+            switch = f"已暂停（{data.get('pause_reason') or '未说明'}）"
+        else:
+            switch = "演出中" if data.get("running") else "运行中"
+        lines = [
+            f"机器人：{data.get('bot_id')}",
+            f"故事：{switch}",
+            f"世界：{data.get('world_title') or '（未命名）'}"
+            if data.get("has_seed")
+            else "世界：还没有导入世界种子",
+            f"人设来源：{data.get('base_card_source') or '没有取到'}"
+            + (f"（{data.get('base_card_chars')} 字）" if data.get("base_card_source") else ""),
+            f"唤醒额度：{data.get('tokens')} / {data.get('capacity'):g}"
+            f"（每天回补 {data.get('refill_per_day'):g}）",
+        ]
+        if data.get("next_wake_at"):
+            lines.append(f"下次唤醒：{clock_mod.iso(int(data['next_wake_at']))}")
+        card_lines = data.get("card_lines") or []
+        lines.append(
+            "状态卡：" + (" ".join(line.lstrip("- ") for line in card_lines) or "（没有或已过期）")
+        )
+        canon = data.get("canon") or {}
+        lines.append(
+            f"场景 {data.get('scenes_total', 0)} 场，设定 {canon.get('seed', 0)} 条种子 + "
+            f"{canon.get('play', 0)} 条演出中新增，主持人笔记 {data.get('notes', 0)} 条"
+        )
+        scenes = data.get("scenes") or []
+        if scenes:
+            last = scenes[0]
+            what = last.get("fragment") if last.get("status") == "ok" else f"失败：{last.get('error')}"
+            lines.append(f"最近一场：{clock_mod.iso(int(last['started_at']))} {what}")
+        problems = data.get("problems") or []
+        if problems:
+            lines.append("还缺：" + "；".join(problems))
+        return "\n".join(lines)
+
     @staticmethod
     def _command_args(event: AstrMessageEvent, name: str) -> str:
         """从 message_str 里剥掉命令本身，保留剩余原文（含空格）。"""
