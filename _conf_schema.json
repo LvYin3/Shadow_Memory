@@ -286,6 +286,12 @@
       "gate_enabled": {"type": "bool", "description": "群聊门控", "default": true},
       "gate_threshold": {"type": "float", "description": "reply_now 阈值", "default": 0.5},
       "gate_history": {"type": "int", "description": "门控参考的最近消息数", "default": 10},
+      "gate_question": {
+        "type": "text",
+        "description": "群聊门控问题：非 @ 群消息到来时问判断模型的那句话",
+        "hint": "整段替换内置问题；必须写成“概率越高越该回复”，否则 gate_threshold 的含义会反。清空则用内置问题。可被 bot_overrides.gate_question 和插件 WebUI「设置」按机器人覆盖。",
+        "default": "Given the recent group messages, how long it has been since the last message, when I last spoke, and who I am, is this message inviting me to respond now? Consider that a short or seemingly incomplete message may be followed by more; prefer silence if the thought is not finished."
+      },
       "max_segments": {"type": "int", "description": "每轮最多分段", "default": 3},
       "speak_max_chars": {"type": "int", "description": "语音单条字数上限", "default": 60},
       "fallback_send_final_text": {"type": "bool", "description": "强制输出：没调用 say 时也发送最终文本（默认关，关闭时不发送）", "default": false},
@@ -356,7 +362,7 @@
   },
   "bot_overrides": {
     "type": "dict",
-    "description": "按机器人覆盖（键为 bot_id）。可覆盖：persona_mode / base_card / gate_enabled / gate_threshold / theta_pre / theta_aux / tts_provider_id / environment_enabled / environment_prompt / qzone_daily_limit / qzone_ugc_right",
+    "description": "按机器人覆盖（键为 bot_id）。可覆盖：persona_mode / base_card / gate_enabled / gate_threshold / gate_question / theta_pre / theta_aux / tts_provider_id / environment_enabled / environment_prompt / qzone_daily_limit / qzone_ugc_right",
     "default": {}
   }
 }

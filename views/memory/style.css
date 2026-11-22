@@ -233,6 +233,18 @@ button:disabled {
   font-weight: 600;
 }
 
+.gate-field {
+  grid-column: 1 / -1;
+}
+
+.gate-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
 label {
   display: flex;
   flex-direction: column;
@@ -242,7 +254,8 @@ label {
 }
 
 input,
-select {
+select,
+textarea {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 7px 8px;

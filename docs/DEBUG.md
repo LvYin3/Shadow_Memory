@@ -71,7 +71,7 @@ AstrBot 日志级别也调到 DEBUG。常用日志：
 ## 群聊门控 DEBUG
 
 - INFO：`group_gate {"result":"reply|silent"}`，一条结果；
-- DEBUG：`group_gate_detail` 概率/阈值/reason/延迟；
+- DEBUG：`group_gate_detail` 概率/阈值/reason/延迟，以及 `question_source`（本次门控问题来自 `webui` / `bot_override` / `config` / `builtin`，见 [CONFIG.md](CONFIG.md#群聊门控问题)）；
 - DEBUG：`on_message_seen`、`group_gate_skip` 入口与跳过原因；
 - 没有判断 provider 时不主动回复，只保留 @/原生唤醒。
 

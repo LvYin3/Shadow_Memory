@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from astrbot_plugin_shadow_memory.core.config import ConfigView, deep_merge
+from astrbot_plugin_shadow_memory.core.config import (
+    DEFAULT_GATE_QUESTION,
+    ConfigView,
+    deep_merge,
+    resolve_gate_question,
+)
+from astrbot_plugin_shadow_memory.memory import prompts
 
 
 def test_defaults_are_complete():
@@ -10,6 +16,7 @@ def test_defaults_are_complete():
     assert cfg.int("recall.max_candidates") == 12
     assert cfg.float("recall.theta_pre") == 0.4
     assert cfg.bool("interaction.gate_enabled") is True
+    assert cfg.str("interaction.gate_question") == DEFAULT_GATE_QUESTION
     assert cfg.bool("interaction.environment.enabled") is True
     assert cfg.str("interaction.environment.prompt") == ""
     assert cfg.bool("interaction.say_example") is True
@@ -40,6 +47,7 @@ def test_bot_override_maps_flat_keys():
             "bot1": {
                 "persona_mode": "plugin_only",
                 "gate_threshold": 0.7,
+                "gate_question": "Should I reply?",
                 "theta_pre": 0.6,
                 "qzone_daily_limit": 1,
                 "tts_provider_id": "tts-abc",
@@ -51,6 +59,7 @@ def test_bot_override_maps_flat_keys():
     cfg = ConfigView(raw, "bot1")
     assert cfg.str("persona.mode") == "plugin_only"
     assert cfg.float("interaction.gate_threshold") == 0.7
+    assert cfg.str("interaction.gate_question") == "Should I reply?"
     assert cfg.float("recall.theta_pre") == 0.6
     assert cfg.int("interaction.qzone.daily_limit") == 1
     assert cfg.section("interaction.tts_provider_ids")["bot1"] == "tts-abc"
@@ -82,3 +91,67 @@ def test_deep_merge_does_not_mutate_inputs():
 def test_unknown_bot_override_key_is_ignored():
     cfg = ConfigView({"bot_overrides": {"bot1": {"nope": 1}}}, "bot1")
     assert cfg.str("persona.mode") == "append"
+
+
+def test_gate_question_alias_keeps_builtin_text():
+    assert prompts.REPLY_NOW_INSTRUCTION == DEFAULT_GATE_QUESTION
+    assert DEFAULT_GATE_QUESTION.startswith("Given the recent group messages")
+
+
+def test_gate_question_defaults_to_builtin():
+    assert resolve_gate_question(ConfigView({}, "bot1")) == (
+        DEFAULT_GATE_QUESTION,
+        "builtin",
+    )
+    # 升级后内置原文会落盘到配置：与内置一致仍算 builtin
+    saved = ConfigView({"interaction": {"gate_question": DEFAULT_GATE_QUESTION}}, "bot1")
+    assert resolve_gate_question(saved) == (DEFAULT_GATE_QUESTION, "builtin")
+
+
+def test_gate_question_priority_webui_bot_config():
+    raw = {
+        "interaction": {"gate_question": "global question"},
+        "bot_overrides": {"bot1": {"gate_question": "bot question"}},
+    }
+    assert resolve_gate_question(ConfigView(raw, "bot1"), "webui question") == (
+        "webui question",
+        "webui",
+    )
+    assert resolve_gate_question(ConfigView(raw, "bot1")) == (
+        "bot question",
+        "bot_override",
+    )
+    assert resolve_gate_question(ConfigView(raw, "bot2")) == (
+        "global question",
+        "config",
+    )
+    assert resolve_gate_question(ConfigView(raw, "")) == ("global question", "config")
+
+
+def test_gate_question_blank_layers_fall_through():
+    raw = {
+        "interaction": {"gate_question": "global question"},
+        "bot_overrides": {"bot1": {"gate_question": "   "}},
+    }
+    # 空的机器人覆盖在合并结果里会盖掉全局值，解析时必须回落到全局
+    assert ConfigView(raw, "bot1").str("interaction.gate_question") == "   "
+    assert resolve_gate_question(ConfigView(raw, "bot1"), "  \n ") == (
+        "global question",
+        "config",
+    )
+    blank = {
+        "interaction": {"gate_question": ""},
+        "bot_overrides": {"bot1": {"gate_question": None}},
+    }
+    assert resolve_gate_question(ConfigView(blank, "bot1"), None) == (
+        DEFAULT_GATE_QUESTION,
+        "builtin",
+    )
+
+
+def test_gate_question_is_trimmed_and_newlines_normalized():
+    raw = {"interaction": {"gate_question": "  line one\r\nline two \n"}}
+    assert resolve_gate_question(ConfigView(raw, "bot1")) == (
+        "line one\nline two",
+        "config",
+    )

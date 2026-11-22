@@ -415,6 +415,7 @@ class Main(Star):
                 str(payload.get("bot") or ""),
                 tts_provider_id=payload.get("tts_provider_id"),
                 context_recent_messages=payload.get("context_recent_messages"),
+                gate_question=payload.get("gate_question"),
                 clear_tts=bool(payload.get("clear_tts")),
                 clear_context=bool(payload.get("clear_context")),
             )
@@ -721,6 +722,14 @@ class Main(Star):
                     history_chars=conversation.get("history_chars"),
                     cache_size=len(self._decision_contexts),
                 )
+        question_override = None
+        if self.kv is not None:
+            try:
+                question_override = await self.kv.get(
+                    event.get_platform_id(), "gate_question"
+                )
+            except Exception as exc:  # noqa: BLE001 - 读不到覆盖就按配置走
+                self.audit.warn("读取门控问题覆盖失败：%s", exc)
         decision = await self.gate_svc.judge(
             bot_id=event.get_platform_id(),
             umo=event.unified_msg_origin,
@@ -728,6 +737,7 @@ class Main(Star):
             sender_name=event.get_sender_name(),
             message_id=str(getattr(event.message_obj, "message_id", "") or ""),
             conversation=conversation,
+            question_override=question_override,
         )
         self.audit.event(
             "group_gate",
@@ -742,6 +752,7 @@ class Main(Star):
             threshold=decision.threshold,
             reason=decision.reason,
             latency_ms=decision.latency_ms,
+            question_source=decision.question_source,
         )
         if decision.passed:
             event.is_at_or_wake_command = True

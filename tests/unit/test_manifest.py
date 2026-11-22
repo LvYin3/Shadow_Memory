@@ -76,6 +76,23 @@ def test_conf_schema_defaults_match_types():
     walk(schema)
 
 
+def test_conf_schema_gate_question_default_matches_builtin():
+    from astrbot_plugin_shadow_memory.core.config import (
+        DEFAULT_CONFIG,
+        DEFAULT_GATE_QUESTION,
+        OVERRIDE_PATHS,
+    )
+
+    schema = json.loads((PLUGIN / "_conf_schema.json").read_text(encoding="utf-8"))
+    item = schema["interaction"]["items"]["gate_question"]
+    assert item["type"] == "text"
+    # schema 的默认值会落盘到用户配置，必须和代码里的内置原文逐字一致
+    assert item["default"] == DEFAULT_GATE_QUESTION
+    assert DEFAULT_CONFIG["interaction"]["gate_question"] == DEFAULT_GATE_QUESTION
+    assert OVERRIDE_PATHS["gate_question"] == "interaction.gate_question"
+    assert "gate_question" in schema["bot_overrides"]["description"]
+
+
 def test_requirements_do_not_pin_extra_packages():
     text = (PLUGIN / "requirements.txt").read_text(encoding="utf-8")
     for line in text.splitlines():

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from astrbot_plugin_shadow_memory.core.config import DEFAULT_GATE_QUESTION
 from astrbot_plugin_shadow_memory.core.kv import KvStore
 from astrbot_plugin_shadow_memory.core.types import Turn
 from astrbot_plugin_shadow_memory.interaction.media import MediaService
@@ -164,6 +165,107 @@ async def test_settings_validate_provider_and_context(env):
         await env.ui.save_settings("bot1", tts_provider_id="nope")
     with pytest.raises(WebUIError):
         await env.ui.save_settings("bot1", context_recent_messages=99)
+
+
+def _bot(data, bot_id="bot1"):
+    return next(row for row in data["bots"] if row["bot_id"] == bot_id)
+
+
+async def test_settings_gate_question_defaults_to_builtin(env):
+    bot1 = _bot(await env.ui.settings())
+    assert bot1["gate_question"] == DEFAULT_GATE_QUESTION
+    assert bot1["gate_question_source"] == "builtin"
+
+
+async def test_settings_gate_question_save_and_clear(env):
+    saved = await env.ui.save_settings("bot1", gate_question="  Should I reply?\r\n")
+    assert saved["gate_question"] == "Should I reply?"
+    assert await env.kv.get("bot1", "gate_question") == "Should I reply?"
+    bot1 = _bot(await env.ui.settings())
+    assert bot1["gate_question"] == "Should I reply?"
+    assert bot1["gate_question_source"] == "webui"
+
+    # 清空 = 跟随配置
+    saved = await env.ui.save_settings("bot1", gate_question="   ")
+    assert saved["gate_question"] is None
+    assert await env.kv.get("bot1", "gate_question") is None
+    bot1 = _bot(await env.ui.settings())
+    assert bot1["gate_question"] == DEFAULT_GATE_QUESTION
+    assert bot1["gate_question_source"] == "builtin"
+
+
+async def test_settings_gate_question_same_as_config_writes_no_override(env):
+    # 文本框预填当前生效的问题；原样提交回来不能变成覆盖
+    await env.ui.save_settings("bot1", gate_question=DEFAULT_GATE_QUESTION)
+    assert await env.kv.get("bot1", "gate_question") is None
+
+    # 已有覆盖时改回配置里的原文，覆盖被删除
+    await env.ui.save_settings("bot1", gate_question="Should I reply?")
+    await env.ui.save_settings("bot1", gate_question=DEFAULT_GATE_QUESTION)
+    assert await env.kv.get("bot1", "gate_question") is None
+
+
+async def test_settings_gate_question_follows_config_layers(env, make_configs):
+    configs = make_configs(
+        {
+            "interaction": {"gate_question": "global question"},
+            "bot_overrides": {"bot1": {"gate_question": "bot question"}},
+        }
+    )
+    env.ui.configs = configs
+    data = await env.ui.settings()
+    assert _bot(data)["gate_question"] == "bot question"
+    assert _bot(data)["gate_question_source"] == "bot_override"
+
+    await env.ui.save_settings("bot1", gate_question="bot question")
+    assert await env.kv.get("bot1", "gate_question") is None
+
+    await env.ui.save_settings("bot1", gate_question="global question")
+    assert await env.kv.get("bot1", "gate_question") == "global question"
+    assert _bot(await env.ui.settings())["gate_question_source"] == "webui"
+
+
+async def test_settings_gate_question_untouched_by_other_saves(env):
+    await env.ui.save_settings("bot1", gate_question="Should I reply?")
+    await env.ui.save_settings("bot1", tts_provider_id="tts-config", context_recent_messages=8)
+    assert await env.kv.get("bot1", "gate_question") == "Should I reply?"
+
+    await env.ui.save_settings("bot1", clear_tts=True, clear_context=True)
+    assert await env.kv.get("bot1", "gate_question") == "Should I reply?"
+
+
+async def test_settings_gate_question_validation(env):
+    with pytest.raises(WebUIError):
+        await env.ui.save_settings("bot1", gate_question="x" * 2001)
+    with pytest.raises(WebUIError):
+        await env.ui.save_settings("bot1", gate_question=123)
+    assert await env.kv.get("bot1", "gate_question") is None
+
+    # 门控问题不合法时，同一次保存里的其它项也不写
+    with pytest.raises(WebUIError):
+        await env.ui.save_settings(
+            "bot1", context_recent_messages=8, gate_question="x" * 2001
+        )
+    assert await env.kv.get("bot1", "context_recent_messages") is None
+
+    await env.ui.save_settings("bot1", gate_question="x" * 2000)
+    assert await env.kv.get("bot1", "gate_question") == "x" * 2000
+
+
+async def test_settings_gate_question_long_config_value_round_trips(env, make_configs):
+    # 配置层的问题不受 WebUI 长度限制；原样提交回来不能报错
+    long_question = "y" * 3000
+    env.ui.configs = make_configs(
+        {
+            "interaction": {
+                "gate_question": long_question,
+                "tts_provider_ids": {"bot1": "tts-config"},
+            }
+        }
+    )
+    assert _bot(await env.ui.settings())["gate_question"] == long_question
+    await env.ui.save_settings("bot1", gate_question=long_question)
+    assert await env.kv.get("bot1", "gate_question") is None
 
 
 async def test_export_full_and_import(env):

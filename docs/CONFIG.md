@@ -37,6 +37,36 @@ AstrBot 的提供商下拉只列对话模型，判断 provider 需要手填。�
 
 优先级：provider 可用 → provider；否则直连；都没有 → 静默。
 
+## 群聊门控问题
+
+非 @ 群消息到来时，插件问判断模型一个 noul 问题，概率 ≥ `gate_threshold` 才接话。这句问题可以改：
+
+```jsonc
+"interaction": {
+  "gate_threshold": 0.5,
+  "gate_question": "Given the recent group messages, ... is this message inviting me to respond now? ..."
+},
+"bot_overrides": {
+  "aiocqhttp": { "gate_question": "..." }
+}
+```
+
+- 整段替换，不是追加；配置项默认预填内置原文，照着改即可。
+- **极性**：问题必须写成“概率越高越该回复”。写成“我该不该保持沉默”这类反向问题，`gate_threshold` 的含义会反过来。
+- 生效优先级：WebUI「设置」页按机器人的覆盖 → `bot_overrides.<bot_id>.gate_question` → 全局 `interaction.gate_question` → 内置原文。任何一层留空（只有空白也算）都落到下一层。
+- 判断模型能看到的 state 字段，写问题时可以引用：
+  - `recent_messages`：最近 `gate_history` 条群消息（`speaker` / `seconds_ago` / `text`）；
+  - `seconds_since_last`：距上一条群消息的秒数；
+  - `my_last_reply_seconds_ago`：我上次在这个群说话距今的秒数，没说过为 `null`；
+  - `persona_tendencies`：与当前消息最相关的至多 3 条人格条目；
+  - `current_message`：当前消息的 `speaker` / `text`；
+  - `conversation`：仅 `decision.full_context=true` 且有上一轮请求快照时才有。
+- 全量上下文判断失败后的轻量重试用同一个问题。
+- WebUI 文本框预填当前生效的问题；清空或改回配置里的原文再保存 = 删除覆盖、跟随配置。WebUI 覆盖上限 2000 字，存在插件数据库的 `kv` 表里，不随记忆导出/导入/转移。
+- WebUI 覆盖每条群消息现读，保存后从下一条消息起生效，不用重载插件。
+- **升级提示**：内置原文会作为默认值落盘到你的配置里。以后插件更新了内置问题，已保存的配置不会自动跟着变；想用新版内置问题，把这一项清空即可。
+- 当前用的是哪一层，看 DEBUG 日志 `group_gate_detail` 的 `question_source`（`webui` / `bot_override` / `config` / `builtin`）。
+
 ## 写作用模型
 
 ```jsonc

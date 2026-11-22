@@ -8,7 +8,7 @@ from typing import Any, Callable, Iterable
 
 from ..core import clock as clock_mod
 from ..core.audit import Audit
-from ..core.config import ConfigView
+from ..core.config import ConfigView, gate_question_text, resolve_gate_question
 from ..core.db import Database
 from ..core.kv import KvStore
 from ..interaction.media import MediaService
@@ -18,6 +18,7 @@ from ..memory.service import MemoryService
 from ..memory.transfer import TransferService
 
 BACKUP_KEEP = 10
+GATE_QUESTION_MAX_CHARS = 2000
 
 
 class WebUIError(ValueError):
@@ -222,6 +223,9 @@ class WebUIService:
             elif not str(effective).strip():
                 effective = ""
                 source = "muted"
+            gate_question, gate_source = resolve_gate_question(
+                self.configs(bot_id), await self.kv.get(bot_id, "gate_question")
+            )
             bots.append(
                 {
                     "bot_id": bot_id,
@@ -231,6 +235,8 @@ class WebUIService:
                     "context_recent_messages": await self.kv.get(
                         bot_id, "context_recent_messages"
                     ),
+                    "gate_question": gate_question,
+                    "gate_question_source": gate_source,
                 }
             )
         return {
@@ -252,10 +258,24 @@ class WebUIService:
         *,
         tts_provider_id: str | None = None,
         context_recent_messages: int | None = None,
+        gate_question: str | None = None,
         clear_tts: bool = False,
         clear_context: bool = False,
     ) -> dict[str, Any]:
         bot_id = self._require_bot_id(bot_id)
+        # 先校验再落库：门控问题不合法时，同一次保存里的其它项也不写。
+        question: str | None = None
+        follow_config = False
+        if gate_question is not None:
+            if not isinstance(gate_question, str):
+                raise WebUIError("门控问题必须是文本")
+            question = gate_question_text(gate_question)
+            # 文本框预填的是当前生效的问题：空或与配置层一致都表示“跟随配置”，不留覆盖。
+            configured, _ = resolve_gate_question(self.configs(bot_id))
+            follow_config = not question or question == configured
+            # 配置层自己的问题不受长度限制，原样提交回来不能报错。
+            if not follow_config and len(question) > GATE_QUESTION_MAX_CHARS:
+                raise WebUIError(f"门控问题不能超过 {GATE_QUESTION_MAX_CHARS} 字")
         if clear_tts:
             await self.kv.delete(bot_id, "tts_provider_id")
         elif tts_provider_id is not None:
@@ -277,12 +297,18 @@ class WebUIService:
             if not 0 <= limit <= 50:
                 raise WebUIError("上下文条数必须是 0-50 的整数")
             await self.kv.set(bot_id, "context_recent_messages", str(limit))
+        if question is not None:
+            if follow_config:
+                await self.kv.delete(bot_id, "gate_question")
+            else:
+                await self.kv.set(bot_id, "gate_question", question)
         return {
             "bot_id": bot_id,
             "tts_provider_id": await self.kv.get(bot_id, "tts_provider_id"),
             "context_recent_messages": await self.kv.get(
                 bot_id, "context_recent_messages"
             ),
+            "gate_question": await self.kv.get(bot_id, "gate_question"),
         }
 
     async def clear_context_override(self, bot_id: str) -> None:

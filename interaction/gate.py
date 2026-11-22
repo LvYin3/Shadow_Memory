@@ -8,9 +8,8 @@ from typing import Any, Callable
 
 from ..core import clock as clock_mod
 from ..core.audit import Audit
-from ..core.config import ConfigView
+from ..core.config import ConfigView, resolve_gate_question
 from ..core.db import Database
-from ..memory import prompts
 from ..memory.persona import PersonaService
 from ..memory.textutil import bigrams, overlap
 
@@ -24,6 +23,7 @@ class GateDecision:
     threshold: float = 0.5
     reason: str = ""
     latency_ms: int = 0
+    question_source: str = ""
 
 
 class Gate:
@@ -69,6 +69,7 @@ class Gate:
         message_id: str = "",
         now: int | None = None,
         conversation: dict[str, Any] | None = None,
+        question_override: str | None = None,
     ) -> GateDecision:
         stamp = now or self.now_fn()
         cfg = self.configs(bot_id)
@@ -106,15 +107,16 @@ class Gate:
         judge_state = (
             {**state, "conversation": conversation} if conversation else state
         )
+        question, source = resolve_gate_question(cfg, question_override)
         started = clock_mod.now_ms()
-        probability = await self.jev.noul(judge_state, prompts.REPLY_NOW_INSTRUCTION)
+        probability = await self.jev.noul(judge_state, question)
         if probability is None and judge_state is not state:
             self.audit.debug(
                 "decision_context_fallback",
                 scope="gate",
                 reason="jev_failed",
             )
-            probability = await self.jev.noul(state, prompts.REPLY_NOW_INSTRUCTION)
+            probability = await self.jev.noul(state, question)
         latency = clock_mod.now_ms() - started
         if probability is None:
             self._failures[umo] = self._failures.get(umo, 0) + 1
@@ -123,7 +125,13 @@ class Gate:
                 self._failures[umo] = 0
                 self.audit.warn("门控连续失败，%s 进入 10 分钟退避", umo)
             await self._log(bot_id, umo, message_id, None, threshold, "silent", "judge_failed", latency)
-            return GateDecision(passed=False, threshold=threshold, reason="judge_failed", latency_ms=latency)
+            return GateDecision(
+                passed=False,
+                threshold=threshold,
+                reason="judge_failed",
+                latency_ms=latency,
+                question_source=source,
+            )
 
         self._failures[umo] = 0
         passed = probability >= threshold
@@ -144,6 +152,7 @@ class Gate:
             threshold=threshold,
             reason=reason,
             latency_ms=latency,
+            question_source=source,
         )
 
     async def _tendencies(self, bot_id: str, message: str) -> list[str]:

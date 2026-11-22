@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from ..core.config import DEFAULT_GATE_QUESTION
+
 # --------------------------------------------------------------------- 事件关闭
 CLOSE_EVENT_SYSTEM = """你是一个人的记忆整理器。这是“我”（助手）刚经历的一段对话。
 
@@ -133,12 +135,8 @@ AUX_INSTRUCTION = (
     "colour this moment enough to surface as an emotional aftertone? Prefer none."
 )
 
-REPLY_NOW_INSTRUCTION = (
-    "Given the recent group messages, how long it has been since the last message, when I "
-    "last spoke, and who I am, is this message inviting me to respond now? Consider that a "
-    "short or seemingly incomplete message may be followed by more; prefer silence if the "
-    "thought is not finished."
-)
+# 群聊门控问题可配置，内置原文在 core.config.DEFAULT_GATE_QUESTION；这里只留别名。
+REPLY_NOW_INSTRUCTION = DEFAULT_GATE_QUESTION
 
 SALIENCE_INSTRUCTION = (
     "How significant is this exchange for me? 1 means trivial small talk I would forget by "

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from astrbot_plugin_shadow_memory.core.config import DEFAULT_GATE_QUESTION
+
 from .helpers import build_stack, text_of_len
-from ..fakes import FakeEvent
+from ..fakes import FakeEvent, FakeJev
 
 
 @pytest.fixture
@@ -91,6 +93,103 @@ async def test_gate_state_contains_persona_tendencies(stack):
     await stack.gate.judge(bot_id="bot1", umo="umo1", message="说话", sender_name="小明")
     _, instructions = stack.jev.calls[-1]
     assert instructions  # 确实问了 reply_now
+
+
+async def test_gate_asks_builtin_question_by_default(stack):
+    decision = await stack.gate.judge(
+        bot_id="bot1", umo="umo1", message="说话", sender_name="小明"
+    )
+    assert stack.jev.calls[-1] == ("noul", DEFAULT_GATE_QUESTION)
+    assert decision.question_source == "builtin"
+
+
+async def test_gate_asks_configured_question(stack, make_configs):
+    local = build_stack(
+        stack.db,
+        make_configs(
+            {
+                "interaction": {"gate_question": "global question"},
+                "bot_overrides": {"bot1": {"gate_question": "bot question"}},
+            }
+        ),
+    )
+    decision = await local.gate.judge(
+        bot_id="bot1", umo="umo1", message="说话", sender_name="小明"
+    )
+    assert local.jev.calls[-1] == ("noul", "bot question")
+    assert decision.question_source == "bot_override"
+
+    decision = await local.gate.judge(
+        bot_id="bot2", umo="umo2", message="说话", sender_name="小明"
+    )
+    assert local.jev.calls[-1] == ("noul", "global question")
+    assert decision.question_source == "config"
+
+
+async def test_gate_question_override_wins(stack, make_configs):
+    local = build_stack(
+        stack.db,
+        make_configs({"bot_overrides": {"bot1": {"gate_question": "bot question"}}}),
+    )
+    decision = await local.gate.judge(
+        bot_id="bot1",
+        umo="umo1",
+        message="说话",
+        sender_name="小明",
+        question_override="webui question",
+    )
+    assert local.jev.calls[-1] == ("noul", "webui question")
+    assert decision.question_source == "webui"
+
+    # 空覆盖等于没有覆盖
+    decision = await local.gate.judge(
+        bot_id="bot1",
+        umo="umo1",
+        message="说话",
+        sender_name="小明",
+        question_override="  ",
+    )
+    assert local.jev.calls[-1] == ("noul", "bot question")
+    assert decision.question_source == "bot_override"
+
+
+async def test_gate_fallback_retry_keeps_same_question(stack, make_configs):
+    class FullContextFails(FakeJev):
+        async def noul(self, state, instructions, criteria=None):
+            self.calls.append(("noul", instructions))
+            self.states.append(state)
+            return None if "conversation" in state else 0.9
+
+    jev = FullContextFails()
+    local = build_stack(
+        stack.db,
+        make_configs({"interaction": {"gate_question": "global question"}}),
+        jev=jev,
+    )
+    decision = await local.gate.judge(
+        bot_id="bot1",
+        umo="umo1",
+        message="说话",
+        sender_name="小明",
+        conversation={"messages": [{"role": "user", "content": "之前的话"}]},
+    )
+    assert decision.passed is True
+    assert jev.calls == [("noul", "global question"), ("noul", "global question")]
+    assert "conversation" in jev.states[0]
+    assert "conversation" not in jev.states[1]
+
+
+async def test_gate_failure_still_reports_question_source(stack):
+    stack.jev.noul_value = None
+    decision = await stack.gate.judge(
+        bot_id="bot1",
+        umo="umo1",
+        message="说话",
+        sender_name="小明",
+        question_override="webui question",
+    )
+    assert decision.reason == "judge_failed"
+    assert decision.question_source == "webui"
 
 
 async def test_note_reply_tracks_time(stack):

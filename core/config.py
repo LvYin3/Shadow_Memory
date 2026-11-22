@@ -9,6 +9,14 @@ DEFAULT_VISION_PROMPT = (
     "用一句不超过 60 字的中文，客观描述这张图里有什么；不要猜测背景故事，不要加评论。"
 )
 
+# 群聊门控发给判断模型的 noul 问题；必须写成“概率越高越该回复”。
+DEFAULT_GATE_QUESTION = (
+    "Given the recent group messages, how long it has been since the last message, when I "
+    "last spoke, and who I am, is this message inviting me to respond now? Consider that a "
+    "short or seemingly incomplete message may be followed by more; prefer silence if the "
+    "thought is not finished."
+)
+
 DEFAULT_CONFIG: dict[str, Any] = {
     "decision": {
         "provider_id": "",
@@ -127,6 +135,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "gate_enabled": True,
         "gate_threshold": 0.50,
         "gate_history": 10,
+        "gate_question": DEFAULT_GATE_QUESTION,
         "max_segments": 3,
         "speak_max_chars": 60,
         "fallback_send_final_text": False,
@@ -172,6 +181,7 @@ OVERRIDE_PATHS: dict[str, str] = {
     "base_card": "persona.base_card",
     "gate_enabled": "interaction.gate_enabled",
     "gate_threshold": "interaction.gate_threshold",
+    "gate_question": "interaction.gate_question",
     "theta_pre": "recall.theta_pre",
     "theta_aux": "recall.theta_aux",
     "tts_provider_id": "interaction.tts_provider_ids",
@@ -319,6 +329,35 @@ def pick_vision_provider_id(
     if fallback:
         return fallback
     return cfg.str("text.provider_id").strip()
+
+
+def gate_question_text(value: Any) -> str:
+    """问题文本归一：统一换行、去首尾空白；None 视为空。"""
+    return as_str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def resolve_gate_question(cfg: ConfigView, override: Any = None) -> tuple[str, str]:
+    """返回 (问题文本, 来源)；来源为 webui / bot_override / config / builtin。
+
+    每一层去空白后为空就落到下一层。这里逐层读原始配置而不是合并结果：
+    合并结果里空的机器人覆盖会盖掉全局值，无法再回落。
+    """
+    text = gate_question_text(override)
+    if text:
+        return text, "webui"
+    overrides = cfg.raw.get("bot_overrides")
+    if cfg.bot_id and isinstance(overrides, Mapping):
+        per_bot = overrides.get(cfg.bot_id)
+        if isinstance(per_bot, Mapping):
+            text = gate_question_text(per_bot.get("gate_question"))
+            if text:
+                return text, "bot_override"
+    interaction = cfg.raw.get("interaction")
+    if isinstance(interaction, Mapping):
+        text = gate_question_text(interaction.get("gate_question"))
+        if text and text != DEFAULT_GATE_QUESTION:
+            return text, "config"
+    return DEFAULT_GATE_QUESTION, "builtin"
 
 
 THINKING_MODES = {"auto", "enabled", "disabled"}

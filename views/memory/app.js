@@ -350,6 +350,13 @@ function ttsOptions(row) {
   return options.join("");
 }
 
+const GATE_SOURCE_LABELS = {
+  webui: "WebUI 覆盖",
+  bot_override: "配置 bot_overrides",
+  config: "全局配置",
+  builtin: "内置默认",
+};
+
 function renderSettings(data) {
   state.tts = data.tts_providers || [];
   state.defaults = data.defaults || {};
@@ -366,6 +373,7 @@ function renderSettings(data) {
         <label>TTS<select class="tts-select">${ttsOptions(row)}</select></label>
         <label>上下文 N<input class="ctx-input" type="number" min="0" max="50" value="${row.context_recent_messages ?? ""}" placeholder="全局 ${data.defaults.context_recent_messages}" /></label>
         <button class="save-btn ghost">保存</button>
+        <label class="gate-field">门控问题（来源：${esc(GATE_SOURCE_LABELS[row.gate_question_source] || row.gate_question_source || "")}）<textarea class="gate-input" rows="4" spellcheck="false">${esc(row.gate_question ?? "")}</textarea></label>
       </div>`,
     )
     .join("");
@@ -391,6 +399,7 @@ async function saveSetting(node) {
   } else {
     body.context_recent_messages = Number(ctxRaw);
   }
+  body.gate_question = node.querySelector(".gate-input").value;
   try {
     await apiPost("settings", body);
     toast("设置已保存");
