@@ -296,9 +296,12 @@ provider_ltm_settings.group_message_history_enable: false
   "chat_digest_items": 5,      // 给背景模型看的最近聊天事件条数；0 = 不发
   "notes_max_chars": 2000,     // 每次带给背景模型的主持人笔记总字数
   "card_stale_hours": 6,       // 状态卡过期多久后不再注入聊天
-  "chat_boundary": true        // 聊天时提醒她不把没发生的事说成已发生
+  "chat_boundary": true,       // 聊天时提醒她不把没发生的事说成已发生
+  "narration": "second"        // 背景模型写给她看的叙述用什么人称：second / first / none
 }
 ```
+
+`narration` 的三种取值：`second` 称她为“你”（默认）；`first` 以她的口吻写“我”看到听到的事；`none` 不带人称，直接写现场。三种只影响叙述怎么写，不影响记忆（她记下的始终是第一人称）。用 deepseek-chat 各演过两轮、每轮二十场：提示词收紧后三种的越界次数都很低，分不出高下；收紧之前，第一人称下背景模型替她行动、替她说话的次数明显更多。换人称后建议用 `tests/live/smoke_story.py --narration first` 在自己的模型上先看几场。
 
 ### 一次唤醒做什么、花多少
 

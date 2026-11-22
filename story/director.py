@@ -190,6 +190,8 @@ class Director:
         min_wake = cfg.int("story.min_wake_minutes", 10, lo=1, hi=1440)
         max_wake = max(min_wake, cfg.int("story.max_wake_minutes", 720, lo=1, hi=10080))
         max_rounds = cfg.int("story.max_rounds", 4, lo=1, hi=8)
+        style = cfg.str("story.narration", prompts.DEFAULT_NARRATION)
+        gm_system = prompts.gm_system(style)
 
         last_scene_at = int(state.get("last_scene_at") or 0)
         first = not last_scene_at
@@ -225,8 +227,10 @@ class Director:
         opening, used = await self.llm.ask_json(
             ROLE_GM,
             bot_id,
-            prompts.GM_SYSTEM,
-            context + "\n\n" + prompts.gm_open_task(first=first, backfill=want_backfill),
+            gm_system,
+            context
+            + "\n\n"
+            + prompts.gm_open_task(first=first, backfill=want_backfill, style=style),
             validate=_guarded(_valid_opening, real_names),
         )
         progress.calls += used
@@ -245,6 +249,7 @@ class Director:
             persona=prepared.persona_text,
             ambient=prepared.ambient_text,
             moment=moment["text"],
+            style=style,
         )
         recall_parts = list(prepared.parts)
 
@@ -258,7 +263,7 @@ class Director:
                 ROLE_ACTOR,
                 bot_id,
                 actor_system,
-                prompts.actor_user(seen, recall_parts),
+                prompts.actor_user(seen, recall_parts, style),
                 validate=_valid_action,
             )
             progress.calls += used
@@ -275,7 +280,7 @@ class Director:
             turn, used = await self.llm.ask_json(
                 ROLE_GM,
                 bot_id,
-                prompts.GM_SYSTEM,
+                gm_system,
                 "\n\n".join(
                     [
                         context,
@@ -284,6 +289,7 @@ class Director:
                             backfill=progress.backfill,
                             twist=twist,
                             lookups=lookups,
+                            style=style,
                         ),
                         prompts.gm_turn_task(last=last),
                     ]
@@ -313,7 +319,7 @@ class Director:
         closing, used = await self.llm.ask_json(
             ROLE_GM,
             bot_id,
-            prompts.GM_SYSTEM,
+            gm_system,
             "\n\n".join(
                 [
                     context,
@@ -322,8 +328,9 @@ class Director:
                         backfill=progress.backfill,
                         twist=twist,
                         lookups=lookups,
+                        style=style,
                     ),
-                    prompts.gm_close_task(min_wake=min_wake, max_wake=max_wake),
+                    prompts.gm_close_task(min_wake=min_wake, max_wake=max_wake, style=style),
                 ]
             ),
             validate=_guarded(_valid_closing, real_names),
@@ -446,7 +453,9 @@ class Director:
             (index for index, turn in enumerate(previous) if turn.get("role") == "me"),
             default=max(0, len(previous) - 1),
         )
-        last_ending = prompts.render_transcript(previous[tail_start:], viewer="gm")[:600]
+        last_ending = prompts.render_transcript(
+            previous[tail_start:], viewer="gm", style=cfg.str("story.narration", "")
+        )[:600]
 
         # 只读外显：聊天事件的碎片与摘要。不读人格三层、洞察和私人笔记。
         last_scene_at = int(state.get("last_scene_at") or 0)
@@ -511,7 +520,9 @@ class Director:
         self, bot_id: str, cfg: ConfigView, progress: SceneProgress
     ) -> dict[str, Any]:
         """把场景整理成她的第一人称记忆，并评显著度。整理失败有兜底，不让整场作废。"""
-        transcript = prompts.render_transcript(progress.transcript, viewer="memory")
+        transcript = prompts.render_transcript(
+            progress.transcript, viewer="memory", style=cfg.str("story.narration", "")
+        )
         result = None
         try:
             result = await self.memory.textgen.generate_json(

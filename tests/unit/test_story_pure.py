@@ -323,6 +323,41 @@ def test_actor_prompt_assembly():
     assert "【我的记忆" not in prompts.actor_user(TRANSCRIPT, [])
 
 
+def test_narration_styles():
+    assert prompts.narration(None).key == "second" == prompts.narration("nonsense").key
+    assert prompts.narration(" First ").key == "first"
+    # 默认（第二人称）与改造前逐字一致
+    assert "叙述用第二人称，称她为“你”" in prompts.GM_SYSTEM == prompts.gm_system("second")
+    assert "<<" not in prompts.GM_SYSTEM and "<<" not in prompts.GM_OPEN_TASK_BACKFILL
+    assert "用“你”来写" in prompts.GM_OPEN_TASK_BACKFILL
+    assert "用“你”来写" in prompts.gm_close_task(min_wake=1, max_wake=2)
+
+    first = prompts.gm_system("first")
+    assert "叙述用第一人称" in first and "只写感知" in first and "第二人称" not in first
+    assert "用“我”来写" in prompts.gm_open_task(first=False, backfill=True, style="first")
+    assert "用“我”来写" in prompts.gm_close_task(min_wake=1, max_wake=2, style="first")
+    none = prompts.gm_system("none")
+    assert "叙述不带人称" in none and "第二人称" not in none
+    assert "不带人称来写" in prompts.gm_open_task(first=False, backfill=True, style="none")
+
+    # 换人称只换叙述的标记和说明；背景模型仍然看不到她的内心
+    for style, tag in (("second", "【旁白】"), ("first", "【眼前】"), ("none", "【眼前】")):
+        gm_view = prompts.render_transcript(TRANSCRIPT, viewer="gm", style=style)
+        assert gm_view.startswith(tag) and "其实不想回去" not in gm_view
+        assert prompts.gm_progress(TRANSCRIPT, backfill="之前的事", style=style).startswith(
+            f"# 这一场到目前为止\n{tag}（补叙）之前的事"
+        )
+        system = prompts.actor_system(base_card="", persona="", ambient="", moment="x", style=style)
+        assert f"- {tag}写的是我此刻看到、听到、感觉到的" in system
+        assert "{" not in system.replace('{"inner"', "")
+    assert "里面的“你”就是我" in prompts.actor_system(
+        base_card="", persona="", ambient="", moment="x"
+    )
+    assert "【我】后面才是我自己想的和做的" in prompts.actor_system(
+        base_card="", persona="", ambient="", moment="x", style="first"
+    )
+
+
 def test_gm_task_templates_render():
     turn = prompts.gm_turn_task(last=True)
     assert "几乎不可能 / 不太可能 / 五五开 / 很可能 / 几乎必然" in turn

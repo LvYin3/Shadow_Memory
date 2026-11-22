@@ -193,6 +193,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "notes_max_chars": 2000,
         "card_stale_hours": 6,
         "chat_boundary": True,
+        "narration": "second",
     },
     "logging": {"retention_days": 90, "debug": False},
     "bot_overrides": {},

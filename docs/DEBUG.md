@@ -179,7 +179,7 @@ $env:PYTHONPATH=".pydeps"
 - `tests/unit/`：模块与纯逻辑；
 - `tests/integration/`：整条记忆链路；`test_story_main_wiring.py` 用 AstrBot 替身把 `main.py` 真正导入并跑一遍故事的接线；
 - `tests/contract/`：AstrBot 接口与工具 schema；
-- `tests/live/`：可选的真实模型冒烟。`smoke_story.py` 用真实模型连演几场故事并打印经过、骰子、状态卡和调用统计，只读环境变量 `DSH_TEST_TEXT_BASE_URL` / `DSH_TEST_TEXT_API_KEY` / `DSH_TEST_TEXT_MODEL`，数据写在临时库里。
+- `tests/live/`：可选的真实模型冒烟。`smoke_story.py` 用真实模型连演几场故事并打印经过、骰子、状态卡和调用统计，只读环境变量 `DSH_TEST_TEXT_BASE_URL` / `DSH_TEST_TEXT_API_KEY` / `DSH_TEST_TEXT_MODEL`，数据写在临时库里；`--narration second|first|none` 换叙述人称，`--start 2026-11-23T08:00` 指定起始时间。
 
 ## 已知取舍
 

@@ -111,6 +111,32 @@ async def test_first_scene_opens_from_the_seed_without_backfill(env):
     assert len(await story_events(env.db)) == 1
 
 
+@pytest.mark.parametrize(("style", "tag"), [("first", "【眼前】"), ("none", "【眼前】")])
+async def test_narration_style_is_configurable(db, make_configs, style, tag):
+    env = build_story(db, make_configs({"story": {"enabled": True, "narration": style}}))
+    await start_story(env)
+    script_scene(env)
+    await env.director.run(BOT)
+    env.clock.advance(3 * HOUR)
+    script_scene(env, opening={**OPENING, "backfill": "之前等雨停。"})
+    await env.director.run(BOT)
+
+    assert all(system == prompts.gm_system(style) for system in env.llm.systems("gm"))
+    gm_prompts = env.llm.prompts("gm")
+    assert f"{tag}店里只剩一把黑伞" in gm_prompts[2]  # 收场时看到的经过
+    assert f"【她】我走进便利店，想买把伞。\n{tag}店里只剩一把黑伞" in gm_prompts[3]  # 上一场的结尾
+    assert prompts.narration(style).hint in gm_prompts[3]  # 补叙的人称提示
+    assert "【旁白】" not in "\n".join(gm_prompts + env.llm.prompts("actor"))
+    assert f"{tag}之前等雨停。" in env.llm.prompts("actor")[1]
+    assert "其实不想回去" not in "\n".join(gm_prompts)
+    # 落库的转录与人称无关
+    turns = await env.db.fetchall("SELECT DISTINCT role, speaker_name FROM event_turns ORDER BY role")
+    assert {(turn["role"], turn["speaker_name"]) for turn in turns} == {
+        ("assistant", ""),
+        ("narrator", "旁白"),
+    }
+
+
 # --------------------------------------------------------------------- 权力边界
 async def test_background_model_only_sees_observable_behaviour(env):
     """背景模型只读外显：人格三层、洞察、私人笔记和她的内心都不能出现在它的提示词里。"""

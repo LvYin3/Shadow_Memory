@@ -24,6 +24,7 @@ import random
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -233,6 +234,11 @@ async def main() -> int:
     parser.add_argument("--rounds", type=int, default=4)
     parser.add_argument("--seed", type=int, default=None, help="随机种子（骰子与偶然种子）")
     parser.add_argument("--no-chat", action="store_true")
+    parser.add_argument(
+        "--narration", default="second", choices=["second", "first", "none"],
+        help="背景模型的叙述人称",
+    )
+    parser.add_argument("--start", default="", help="起始时间，如 2026-11-23T08:00；默认现在")
     args = parser.parse_args()
 
     base = os.environ.get("DSH_TEST_TEXT_BASE_URL", "").strip()
@@ -248,7 +254,10 @@ async def main() -> int:
     workdir.mkdir(parents=True, exist_ok=True)
 
     raw_config = {
-        "story": {"enabled": True, "base_card": BASE_CARD, "max_rounds": args.rounds},
+        "story": {
+            "enabled": True, "base_card": BASE_CARD, "max_rounds": args.rounds,
+            "narration": args.narration,
+        },
         "text": {"base_url": base, "api_key": key, "model": model, "max_tokens": 1200},
         "decision": {
             "base_url": base, "api_key": key, "model": model,
@@ -264,6 +273,8 @@ async def main() -> int:
     db = Database(workdir / "memory.db")
     await db.connect()
     clock = Clock()
+    if args.start:
+        clock.now = int(datetime.fromisoformat(args.start).timestamp() * 1000)
     try:
         stack = build_stack(
             db,
@@ -295,7 +306,10 @@ async def main() -> int:
         )
         await service.import_seed(BOT, world_seed())
         await service.enable(BOT)
-        print(f"模型：{model}   轮数上限：{args.rounds}   起始时间：{clock_mod.iso(clock.now)}")
+        print(
+            f"模型：{model}   轮数上限：{args.rounds}   叙述人称：{args.narration}   "
+            f"起始时间：{clock_mod.iso(clock.now)}"
+        )
 
         played = 0
         for index in range(1, args.scenes + 1):
