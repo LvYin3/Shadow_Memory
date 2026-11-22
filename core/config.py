@@ -79,6 +79,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "edges": {"enabled": True, "max_degree": 20, "neighbors": 4},
     "recall": {
         "max_candidates": 12,
+        "candidate_pool": 400,
         "theta_pre": 0.40,
         "theta_aux": 0.35,
         "cooldown_turns": 10,
@@ -91,6 +92,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "recent_days": 7,
         "recent_limit": 5,
+        "recent_chat_min": 2,
         "recent_max_chars": 150,
         "people_limit": 5,
         "person_topic_chars": 20,

@@ -67,10 +67,14 @@ class RecallService:
         cfg = self.configs(bot_id)
         limit = cfg.int("recall.max_candidates", 12, lo=1, hi=50)
         floor = cfg.float("dynamics.r_floor", 0.2)
+        # 库里存的 R 只会比实时值偏高（衰减每天才重算一次、被想起时重置为 1），
+        # 所以用下限的一半先在 SQL 里筛掉已经忘掉的，不让它们占候选池的名额。
+        pool = cfg.int("recall.candidate_pool", 400, lo=50, hi=5000)
         rows = await self.db.fetchall(
             "SELECT * FROM events WHERE bot_id=? AND status='closed' AND merged_into IS NULL "
-            "AND kind IN ('episodic', 'gist') ORDER BY ended_at DESC LIMIT 200",
-            (bot_id,),
+            "AND kind IN ('episodic', 'gist') AND retrievability >= ? "
+            "ORDER BY ended_at DESC LIMIT ?",
+            (bot_id, floor * 0.5, pool),
         )
         excluded = exclude_event_ids or set()
         rows = [row for row in rows if int(row.get("id") or 0) not in excluded]

@@ -63,19 +63,7 @@ class AmbientService:
             for row in important
             if row.get("source_event_id") is not None
         }
-        recent_all = await self.db.fetchall(
-            "SELECT id, fragment, summary, ended_at FROM events "
-            "WHERE bot_id=? AND status='closed' AND merged_into IS NULL "
-            "AND kind IN ('episodic', 'gist') AND ended_at >= ? "
-            "ORDER BY ended_at DESC LIMIT 20",
-            (
-                bot_id,
-                stamp - cfg.int("ambient.recent_days", 7, lo=1, hi=60) * 86_400_000,
-            ),
-        )
-        recent = [
-            row for row in recent_all if int(row.get("id") or 0) not in important_ids
-        ][: cfg.int("ambient.recent_limit", 5, lo=1, hi=20)]
+        recent = await self._recent(bot_id, cfg, stamp, important_ids)
         people = await self.db.fetchall(
             "SELECT person_id, name, aliases, last_topic, last_seen FROM people "
             "WHERE bot_id=? ORDER BY last_seen DESC LIMIT ?",
@@ -90,6 +78,55 @@ class AmbientService:
             recent_event_ids=[int(row["id"]) for row in recent],
             important_event_ids=sorted(important_ids),
         )
+
+    async def _recent(
+        self, bot_id: str, cfg: ConfigView, now: int, important_ids: set[int]
+    ) -> list[dict[str, Any]]:
+        """最近的事：不收无足轻重的（salience 1），并给聊天留名额。
+
+        故事模块每天会产生很多事件；不留名额的话，“最近”会全是她自己的日常，
+        和人聊过什么反而从背景里消失。
+        """
+        limit = cfg.int("ambient.recent_limit", 5, lo=1, hi=20)
+        chat_min = min(limit, cfg.int("ambient.recent_chat_min", 2, lo=0, hi=20))
+        since = now - cfg.int("ambient.recent_days", 7, lo=1, hi=60) * 86_400_000
+        base = (
+            "SELECT id, fragment, summary, ended_at, source FROM events "
+            "WHERE bot_id=? AND status='closed' AND merged_into IS NULL "
+            "AND kind IN ('episodic', 'gist') AND ended_at >= ? "
+            "AND COALESCE(salience, 2) > 1 "
+        )
+        fetch = limit + len(important_ids)
+        rows = await self.db.fetchall(
+            base + "ORDER BY ended_at DESC, id DESC LIMIT ?", (bot_id, since, fetch)
+        )
+        recent = [row for row in rows if int(row["id"]) not in important_ids][:limit]
+        missing = chat_min - sum(1 for row in recent if row.get("source") != "story")
+        if missing > 0:
+            chat_rows = await self.db.fetchall(
+                base + "AND source<>'story' ORDER BY ended_at DESC, id DESC LIMIT ?",
+                (bot_id, since, chat_min + len(important_ids)),
+            )
+            chosen = {int(row["id"]) for row in recent}
+            extra = [
+                row
+                for row in chat_rows
+                if int(row["id"]) not in important_ids and int(row["id"]) not in chosen
+            ][:missing]
+            # 让出最旧的故事名额，再按时间排回去
+            overflow = len(recent) + len(extra) - limit
+            for index in range(len(recent) - 1, -1, -1):
+                if overflow <= 0:
+                    break
+                if recent[index].get("source") == "story":
+                    del recent[index]
+                    overflow -= 1
+            recent = sorted(
+                recent + extra,
+                key=lambda row: (int(row.get("ended_at") or 0), int(row["id"])),
+                reverse=True,
+            )[:limit]
+        return recent
 
     async def on_event_closed(self, event: dict[str, Any]) -> None:
         bot_id = str(event.get("bot_id") or "")

@@ -202,6 +202,7 @@
     "description": "召回",
     "items": {
       "max_candidates": {"type": "int", "description": "候选上限", "default": 12},
+      "candidate_pool": {"type": "int", "description": "候选池：从最近多少条还没忘掉的事件里找候选", "hint": "事件增长快（例如开了故事模块）时调大，避免较早的记忆进不了候选。", "default": 400},
       "theta_pre": {"type": "float", "description": "主句注入阈值", "default": 0.4},
       "theta_aux": {"type": "float", "description": "辅句注入阈值", "default": 0.35},
       "cooldown_turns": {"type": "int", "description": "同一记忆冷却轮数", "default": 10},
@@ -217,7 +218,8 @@
     "items": {
       "enabled": {"type": "bool", "description": "启用常驻背景", "default": true},
       "recent_days": {"type": "int", "description": "近期事件回看天数", "default": 7},
-      "recent_limit": {"type": "int", "description": "近期事件最多条数", "default": 5},
+      "recent_limit": {"type": "int", "description": "近期事件最多条数", "hint": "无足轻重的事件（salience 1）不进“最近”。", "default": 5},
+      "recent_chat_min": {"type": "int", "description": "近期事件里至少留给聊天的条数", "hint": "开了故事模块后，防止“最近”被她自己的日常占满；0 表示不保留。", "default": 2},
       "recent_max_chars": {"type": "int", "description": "近期事件总字数上限", "default": 150},
       "people_limit": {"type": "int", "description": "常驻人物上限", "default": 5},
       "person_topic_chars": {"type": "int", "description": "每个人物最近话题字数上限", "default": 20},

@@ -28,13 +28,14 @@ async def _event(
     salience: int = 3,
     ended_at: int = NOW,
     bot_id: str = "bot1",
+    source: str = "chat",
 ) -> int:
     if event_id is None:
         return await db.execute(
             "INSERT INTO events(bot_id, umo, kind, started_at, ended_at, fragment, summary, "
-            "salience, status, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            "salience, status, source, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
             (bot_id, "umo1", "episodic", ended_at, ended_at, fragment, summary or None,
-             salience, "closed", ended_at),
+             salience, "closed", source, ended_at),
         )
     await db.execute(
         "INSERT INTO events(id, bot_id, umo, kind, started_at, ended_at, fragment, summary, "
@@ -67,6 +68,54 @@ async def test_recent_uses_summary_fallback_and_budget(ambient, db):
     assert "旧碎片" in snap.text
     assert len(snap.recent_event_ids) == 2
     assert len(snap.text) <= 400
+
+
+async def test_recent_skips_trivial_events(ambient, db):
+    kept = await _event(db, fragment="小明说要搬家", salience=2, ended_at=NOW - DAY)
+    trivial = await _event(db, fragment="打了个招呼", salience=1, ended_at=NOW)
+    snap = await ambient.snapshot("bot1")
+    assert snap.recent_event_ids == [kept]
+    assert trivial not in snap.recent_event_ids
+
+
+async def test_recent_keeps_room_for_chat_when_story_floods(ambient, db):
+    """故事事件再多，“最近”里也要留两条聊天。"""
+    chats = [
+        await _event(db, fragment=f"和小明聊的第{index}件事", ended_at=NOW - 3 * DAY + index)
+        for index in range(3)
+    ]
+    stories = [
+        await _event(db, fragment=f"今天的第{index}段日常", ended_at=NOW - index, source="story")
+        for index in range(6)
+    ]
+    snap = await ambient.snapshot("bot1")
+    assert len(snap.recent_event_ids) == 5
+    # 三条最新的故事 + 两条最新的聊天，按时间从新到旧
+    assert snap.recent_event_ids == [stories[0], stories[1], stories[2], chats[2], chats[1]]
+
+
+async def test_recent_chat_reservation_can_be_disabled(db, make_configs):
+    service = AmbientService(
+        db,
+        make_configs({"ambient": {"recent_chat_min": 0}}),
+        FakeJev(),
+        _audit(),
+        now_fn=lambda: NOW,
+    )
+    await _event(db, fragment="和小明聊天", ended_at=NOW - 3 * DAY)
+    stories = [
+        await _event(db, fragment=f"日常{index}", ended_at=NOW - index, source="story")
+        for index in range(6)
+    ]
+    snap = await service.snapshot("bot1")
+    assert snap.recent_event_ids == stories[:5]
+
+
+async def test_recent_reservation_does_not_drop_story_when_there_is_room(ambient, db):
+    chat = await _event(db, fragment="和小明聊天", ended_at=NOW - 2 * DAY)
+    story = await _event(db, fragment="去了趟图书馆", ended_at=NOW, source="story")
+    snap = await ambient.snapshot("bot1")
+    assert snap.recent_event_ids == [story, chat]
 
 
 async def test_important_is_excluded_from_recent_and_rendered(ambient, db):

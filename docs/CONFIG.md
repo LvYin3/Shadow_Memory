@@ -165,6 +165,7 @@ provider_ltm_settings.group_message_history_enable: false
   "enabled": true,
   "recent_days": 7,
   "recent_limit": 5,
+  "recent_chat_min": 2,
   "recent_max_chars": 150,
   "people_limit": 5,
   "person_topic_chars": 20,
@@ -176,7 +177,8 @@ provider_ltm_settings.group_message_history_enable: false
 }
 ```
 
-- 近期：最近 7 天最多 5 条关闭事件；
+- 近期：最近 7 天最多 5 条关闭事件；无足轻重的事件（`salience=1`）不进“最近”；
+- `recent_chat_min`：近期里至少留给聊天事件的条数，防止被故事事件占满；`0` 表示不保留；
 - 人物：前 5，每人一句最近话题；
 - 重要：事件关闭时对 `salience>=min_salience` 问 JEV，过阈值才升入；
 - 近期排除 important，重要只出现在“重要”行；
@@ -186,6 +188,7 @@ provider_ltm_settings.group_message_history_enable: false
 
 ```jsonc
 "recall": {
+  "candidate_pool": 400,
   "skip_smalltalk": true,
   "min_query_chars": 2
 },
@@ -196,6 +199,7 @@ provider_ltm_settings.group_message_history_enable: false
 ```
 
 - 寒暄/短消息跳过细节召回，常驻背景仍注入；
+- `candidate_pool`：从最近多少条还没忘掉的事件里找候选；已经忘掉的不占名额；
 - 无候选不调用 JEV；
 - 召回主句和张力辅句合并为一个 `ask`；
 - post_turn 的 4 个判断合并为一个 `ask`；

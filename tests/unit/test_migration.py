@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+
+import pytest
 
 from astrbot_plugin_shadow_memory.core.db import Database
 
@@ -101,6 +104,63 @@ async def test_transaction_rolls_back(db):
     except RuntimeError:
         pass
     assert await db.kv_get("b", "k") is None
+
+
+async def test_transaction_does_not_absorb_other_tasks(db):
+    """别的协程在事务期间的写入要等锁，不能被卷进事务随回滚一起丢。"""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def holder() -> None:
+        try:
+            async with db.transaction():
+                await db.execute(
+                    "INSERT INTO kv(bot_id, key, value, updated_at) VALUES('b','inside','v',1)"
+                )
+                entered.set()
+                await release.wait()
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+
+    async def outsider() -> None:
+        await entered.wait()
+        await db.execute(
+            "INSERT INTO kv(bot_id, key, value, updated_at) VALUES('b','outside','v',1)"
+        )
+
+    holding = asyncio.create_task(holder())
+    writing = asyncio.create_task(outsider())
+    await entered.wait()
+    await asyncio.sleep(0.05)
+    assert not writing.done()
+    release.set()
+    await asyncio.gather(holding, writing)
+    assert await db.kv_get("b", "inside") is None
+    assert await db.kv_get("b", "outside") == "v"
+
+
+async def test_concurrent_transactions_queue(db):
+    async def work(key: str) -> None:
+        async with db.transaction():
+            await db.execute(
+                "INSERT INTO kv(bot_id, key, value, updated_at) VALUES('b',?,'v',1)", (key,)
+            )
+            await asyncio.sleep(0.01)
+
+    await asyncio.gather(work("first"), work("second"))
+    assert await db.kv_get("b", "first") == "v"
+    assert await db.kv_get("b", "second") == "v"
+
+
+async def test_nested_transaction_in_same_task_is_rejected(db):
+    async with db.transaction():
+        with pytest.raises(RuntimeError):
+            async with db.transaction():
+                pass
+    # 外层事务照常提交，锁也已释放
+    await db.kv_set("b", "after", "v", 1)
+    assert await db.kv_get("b", "after") == "v"
 
 
 async def test_kv_upsert(db):

@@ -60,6 +60,41 @@ async def test_candidates_require_r_above_floor(stack):
     assert below == 1
 
 
+async def _bulk_events(db, count: int, *, ended: int, retrievability: float) -> None:
+    await db.executemany(
+        "INSERT INTO events(bot_id, umo, kind, started_at, ended_at, fragment, entities, "
+        "storage_strength, retrievability, last_recalled_at, salience, status, created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            ("bot1", "umo1", "episodic", ended + index, ended + index, f"路上的第{index}件小事",
+             "[]", 7.0, retrievability, ended, 2, "closed", ended)
+            for index in range(count)
+        ],
+    )
+
+
+async def test_older_memory_survives_many_newer_events(stack):
+    """新事件再多，较早但还记得的事也要能进候选（旧实现只看最近 200 条）。"""
+    now = 100 * DAY
+    old = await _event(
+        stack.db, "那次一起去海边", ["海边"], strength=14.0, last=now - 3 * DAY, ended=now - 3 * DAY
+    )
+    await _bulk_events(stack.db, 250, ended=now - DAY, retrievability=1.0)
+    candidates, _ = await stack.recall.candidates("bot1", "海边", now)
+    assert old in {candidate.event_id for candidate in candidates}
+
+
+async def test_forgotten_events_do_not_occupy_the_pool(db, make_configs):
+    stack = build_stack(db, make_configs({"recall": {"candidate_pool": 50}}))
+    now = 100 * DAY
+    old = await _event(
+        db, "那次一起去海边", ["海边"], strength=14.0, last=now - 3 * DAY, ended=now - 3 * DAY
+    )
+    await _bulk_events(db, 80, ended=now - DAY, retrievability=0.01)
+    candidates, _ = await stack.recall.candidates("bot1", "海边", now)
+    assert old in {candidate.event_id for candidate in candidates}
+
+
 async def test_candidates_are_capped(stack):
     now = 100 * DAY
     for index in range(20):

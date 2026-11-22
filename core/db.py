@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS events (
   truncated INTEGER NOT NULL DEFAULT 0,
   merged_into INTEGER,
   status TEXT NOT NULL DEFAULT 'open',
+  source TEXT NOT NULL DEFAULT 'chat',
   created_at INTEGER NOT NULL
 );
 
@@ -360,7 +361,9 @@ class Database:
         self.path = Path(path)
         self._conn: sqlite3.Connection | None = None
         self._lock = asyncio.Lock()
-        self._in_tx = False
+        # 持有事务的任务。只有它本人可以免锁复用连接；其他协程照常等锁，
+        # 否则它们的写入会被卷进别人的事务，回滚时一起丢。
+        self._tx_owner: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ 连接
     async def connect(self) -> None:
@@ -406,8 +409,11 @@ class Database:
         return self._conn
 
     # ------------------------------------------------------------------ 执行
+    def _owns_tx(self) -> bool:
+        return self._tx_owner is not None and self._tx_owner is asyncio.current_task()
+
     async def _run(self, fn):
-        if self._in_tx:
+        if self._owns_tx():
             return await asyncio.to_thread(fn)
         async with self._lock:
             return await asyncio.to_thread(fn)
@@ -449,10 +455,15 @@ class Database:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
-        if self._in_tx:
+        """事务内的读写必须由进入事务的同一个任务发出。
+
+        在事务里派生子任务（``create_task`` / ``gather`` / 旧版 ``wait_for``）再访问
+        数据库会等不到锁；别的任务想开事务则排队等待，不会报错。
+        """
+        if self._owns_tx():
             raise RuntimeError("nested transaction is not supported")
         async with self._lock:
-            self._in_tx = True
+            self._tx_owner = asyncio.current_task()
             try:
                 await asyncio.to_thread(self.conn.execute, "BEGIN IMMEDIATE")
                 yield
@@ -461,7 +472,7 @@ class Database:
                 await asyncio.to_thread(self.conn.execute, "ROLLBACK")
                 raise
             finally:
-                self._in_tx = False
+                self._tx_owner = None
 
     # ------------------------------------------------------------------ KV
     async def kv_get(self, bot_id: str, key: str, default: str | None = None) -> str | None:
@@ -510,6 +521,7 @@ class Database:
                 "merged_into": "INTEGER",
                 "entities": "TEXT",
                 "source_event_ids": "TEXT",
+                "source": "TEXT NOT NULL DEFAULT 'chat'",
             },
             "facts": {
                 "storage_strength": "REAL NOT NULL DEFAULT 30.0",
