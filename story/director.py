@@ -18,6 +18,7 @@ from ..core.db import Database
 from ..memory import prompts as memory_prompts
 from ..memory.edges import normalize_entities
 from ..memory.service import MemoryService
+from ..memory.textutil import trim_at_boundary
 from . import bucket, oracle, prompts, world
 from .card import MINUTE_MS, StatusCard, build_card, load_card, render_for_gm
 from .llm import ROLE_ACTOR, ROLE_GM, StoryLLM, StoryLLMError
@@ -32,6 +33,11 @@ NARRATOR_NAME = "旁白"
 
 def _clip(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
+
+
+def _prose(value: Any, limit: int) -> str:
+    """叙述类文本超长时尽量断在句末，不把一句话拦腰截断。"""
+    return trim_at_boundary(str(value or ""), limit)
 
 
 @dataclass(slots=True)
@@ -90,6 +96,41 @@ def _valid_closing(value: dict[str, Any]) -> bool:
     return isinstance(card, dict) and bool(
         str(card.get("where") or "").strip() or str(card.get("doing") or "").strip()
     )
+
+
+REAL_PERSON_FEEDBACK = (
+    "叙述里出现了「{name}」。这是她手机那头现实里的人，不属于这个世界："
+    "不能出现、说话、来电或发消息。请改写，叙述里不要再提到这个名字。"
+)
+
+
+def _narrated(value: dict[str, Any]) -> str:
+    """背景模型这次输出里会被她读到的全部文字。"""
+    parts = [value.get("backfill"), value.get("narration"), value.get("epilogue")]
+    check = value.get("check")
+    if isinstance(check, dict):
+        parts += [check.get("what"), check.get("success"), check.get("failure")]
+    return "\n".join(str(part) for part in parts if part)
+
+
+def _mentioned(names: list[str], text: str) -> str:
+    return next((name for name in names if name in text), "")
+
+
+def _guarded(base: Callable[[dict[str, Any]], bool], names: list[str]):
+    """在结构校验之外，再拦住“替现实里的人说话”。
+
+    背景模型能从聊天摘要里看到她和谁聊过。要是它在场景里写“某某发来消息”，她就会
+    记住一段现实里从没发生过的对话。提示词里禁止过，但模型不一定照做，所以这里硬拦。
+    """
+
+    def validator(value: dict[str, Any]) -> bool | str:
+        if not base(value):
+            return False
+        name = _mentioned(names, _narrated(value))
+        return REAL_PERSON_FEEDBACK.format(name=name) if name else True
+
+    return validator
 
 
 class Director:
@@ -178,6 +219,7 @@ class Director:
             per_day=per_day,
             capacity=capacity,
         )
+        real_names = await self._real_names(bot_id, state, canon, context)
 
         # ---- 开场（含补叙）
         opening, used = await self.llm.ask_json(
@@ -185,11 +227,11 @@ class Director:
             bot_id,
             prompts.GM_SYSTEM,
             context + "\n\n" + prompts.gm_open_task(first=first, backfill=want_backfill),
-            validate=_valid_opening,
+            validate=_guarded(_valid_opening, real_names),
         )
         progress.calls += used
-        progress.backfill = _clip(opening.get("backfill"), 300) if want_backfill else ""
-        progress.transcript.append({"role": "narrator", "text": _clip(opening["narration"], 400)})
+        progress.backfill = _prose(opening.get("backfill"), 300) if want_backfill else ""
+        progress.transcript.append({"role": "narrator", "text": _prose(opening["narration"], 400)})
         lookups = self._lookups(canon, opening.get("lookup"))
 
         # ---- 她的上下文：人设、人格、常驻背景每轮都带；召回只在开场做一次
@@ -223,8 +265,8 @@ class Director:
             progress.transcript.append(
                 {
                     "role": "me",
-                    "inner": _clip(action.get("inner"), 120),
-                    "text": _clip(action["action"], 240),
+                    "inner": _prose(action.get("inner"), 120),
+                    "text": _prose(action["action"], 240),
                 }
             )
             progress.rounds = round_no
@@ -246,7 +288,7 @@ class Director:
                         prompts.gm_turn_task(last=last),
                     ]
                 ),
-                validate=_valid_turn,
+                validate=_guarded(_valid_turn, real_names),
             )
             progress.calls += used
             lookups = self._lookups(canon, turn.get("lookup"))
@@ -263,7 +305,7 @@ class Director:
                     twist = result.label
             else:
                 narration = turn["narration"]
-            progress.transcript.append({"role": "narrator", "text": _clip(narration, 400)})
+            progress.transcript.append({"role": "narrator", "text": _prose(narration, 400)})
             if last or bool(turn.get("end")):
                 break
 
@@ -284,10 +326,18 @@ class Director:
                     prompts.gm_close_task(min_wake=min_wake, max_wake=max_wake),
                 ]
             ),
-            validate=_valid_closing,
+            validate=_guarded(_valid_closing, real_names),
         )
         progress.calls += used
-        epilogue = _clip(closing.get("epilogue"), 200)
+        # 现实里的人也不能被登记成世界设定（笔记是背景模型自己看的，可以提到）。
+        if isinstance(closing.get("canon"), list):
+            closing["canon"] = [
+                item
+                for item in closing["canon"]
+                if isinstance(item, dict)
+                and not _mentioned(real_names, f"{item.get('name')}\n{item.get('body')}")
+            ]
+        epilogue = _prose(closing.get("epilogue"), 200)
         if epilogue:
             progress.transcript.append({"role": "narrator", "text": epilogue})
 
@@ -307,6 +357,54 @@ class Director:
         )
 
     # ------------------------------------------------------------------ 背景模型的上下文
+    async def _real_names(
+        self, bot_id: str, state: dict[str, Any], canon: list[dict[str, Any]], context: str
+    ) -> list[str]:
+        """背景模型这次能看到的、现实里和她聊过天的人的名字。
+
+        只取出现在它上下文里的（它不知道的名字不会去写），并排除与世界种子撞名的
+        （种子是用户写的，撞名时以世界里的人物为准）。单字的名字太容易误伤，不拦。
+        """
+        rows = await self.db.fetchall(
+            "SELECT name, aliases FROM people WHERE bot_id=?", (bot_id,)
+        )
+        names: set[str] = set()
+        for row in rows:
+            names.add(str(row.get("name") or "").strip())
+            try:
+                aliases = json.loads(str(row.get("aliases") or "[]"))
+            except (TypeError, ValueError):
+                aliases = []
+            if isinstance(aliases, list):
+                names.update(str(alias).strip() for alias in aliases)
+        meta = self.store.seed_meta(state)
+        opening = meta.get("opening") if isinstance(meta.get("opening"), dict) else {}
+        world_text = "\n".join(
+            [
+                str(state.get("world_title") or ""),
+                str(state.get("outline") or ""),
+                *[str(hook) for hook in meta.get("hooks") or []],
+                *[str(value) for value in opening.values()],
+                *[
+                    f"{entry.get('name')} {entry.get('body')}"
+                    for entry in canon
+                    if entry.get("origin") == "seed"
+                ],
+            ]
+        )
+        return sorted(
+            (
+                name
+                for name in names
+                if len(name) >= 2
+                and name != "对方"
+                and name in context
+                and name not in world_text
+            ),
+            key=len,
+            reverse=True,
+        )
+
     @staticmethod
     def _lookups(canon: list[dict[str, Any]], names: Any) -> list[str]:
         if not isinstance(names, list):
@@ -340,6 +438,15 @@ class Director:
             for row in reversed(scenes)
             if str(row.get("summary") or "").strip()
         ]
+
+        # 上一场的结尾（她最后一步和之后的旁白），让新的一场接得上、不重演。
+        # 用 gm 视角渲染：只有她外显的言行，不带内心。
+        previous = await self.store.last_transcript(bot_id)
+        tail_start = max(
+            (index for index, turn in enumerate(previous) if turn.get("role") == "me"),
+            default=max(0, len(previous) - 1),
+        )
+        last_ending = prompts.render_transcript(previous[tail_start:], viewer="gm")[:600]
 
         # 只读外显：聊天事件的碎片与摘要。不读人格三层、洞察和私人笔记。
         last_scene_at = int(state.get("last_scene_at") or 0)
@@ -396,6 +503,7 @@ class Director:
             card=render_for_gm(card, now),
             digest=digest,
             seed=seed,
+            last_ending=last_ending,
         )
 
     # ------------------------------------------------------------------ 进入记忆
@@ -434,7 +542,7 @@ class Director:
         backfill_fragment = ""
         if isinstance(result, dict):
             fragment = _clip(result.get("fragment"), 80)
-            summary = _clip(result.get("summary"), 300)
+            summary = _prose(result.get("summary"), 300)
             entities = normalize_entities(result.get("entities"))
             backfill_fragment = _clip(result.get("backfill_fragment"), 60)
         if not fragment:
@@ -621,7 +729,7 @@ class Director:
                 rolls=progress.rolls,
                 transcript=progress.transcript,
                 backfill=progress.backfill,
-                summary=_clip(closing.get("summary"), 200),
+                summary=_prose(closing.get("summary"), 200),
                 salience=salience,
                 event_id=event_id,
                 backfill_event_id=backfill_event_id,

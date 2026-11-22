@@ -118,7 +118,7 @@ AstrBot cron 唤醒不触发 `on_llm_request`，所以备忘轮到点时靠 `mem
 **日志：**
 
 - INFO：`story_scene`（一场演完：轮数、调用次数、掷骰次数、显著度、新增设定、下次唤醒间隔、剩余额度）、`story_wait_tokens`、`story_enabled` / `story_disabled` / `story_paused` / `story_resumed`、`story_seed_imported`；
-- WARN：`故事场景失败`、`故事模型调用失败`、`故事模型输出不是 JSON 对象`、`故事模块配置的 provider 不可用`；
+- WARN：`故事场景失败`、`故事模型调用失败`、`故事模型输出不是 JSON 对象`、`故事模型输出不合格`（后面带原因，例如叙述里出现了现实联系人的名字）、`故事模块配置的 provider 不可用`；
 - ERROR：`故事连续 N 次失败，已自动暂停`；
 - DEBUG：`story_llm`（每次调用的角色与字数）、`environment_injected` 的 `story_lines`（状态卡注入了几行）。
 
@@ -179,7 +179,7 @@ $env:PYTHONPATH=".pydeps"
 - `tests/unit/`：模块与纯逻辑；
 - `tests/integration/`：整条记忆链路；`test_story_main_wiring.py` 用 AstrBot 替身把 `main.py` 真正导入并跑一遍故事的接线；
 - `tests/contract/`：AstrBot 接口与工具 schema；
-- `tests/live/`：可选的真实模型冒烟。
+- `tests/live/`：可选的真实模型冒烟。`smoke_story.py` 用真实模型连演几场故事并打印经过、骰子、状态卡和调用统计，只读环境变量 `DSH_TEST_TEXT_BASE_URL` / `DSH_TEST_TEXT_API_KEY` / `DSH_TEST_TEXT_MODEL`，数据写在临时库里。
 
 ## 已知取舍
 

@@ -165,6 +165,105 @@ async def test_chat_digest_can_be_switched_off(db, make_configs):
     assert "小明说给我寄了一盒茶" not in "\n".join(env.llm.prompts("gm"))
 
 
+# --------------------------------------------------------------------- 不替现实里的人说话
+async def chat_with(db, name: str = "小明", fragment: str = "小明说给我寄了一盒茶") -> None:
+    """她在聊天里认识的一个真人，以及一条相关的聊天记忆。"""
+    await db.execute(
+        "INSERT INTO people(bot_id, person_id, name, aliases, last_topic, last_seen, "
+        "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        (BOT, "u1", name, '["明明"]', None, NOW, NOW, NOW),
+    )
+    await db.execute(
+        "INSERT INTO events(bot_id, umo, kind, started_at, ended_at, fragment, salience, "
+        "status, source, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (BOT, "umo1", "episodic", NOW - HOUR, NOW - HOUR, fragment, 3, "closed", "chat",
+         NOW - HOUR),
+    )
+
+
+FAKE_MESSAGE = "你的手机弹出一条消息，是小明：「睡了没」。"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        {"opening": {**OPENING, "narration": FAKE_MESSAGE}},
+        {"turns": [{**PLAIN_TURN, "narration": FAKE_MESSAGE}]},
+        {
+            "turns": [
+                {
+                    "check": {
+                        "what": "等回信",
+                        "likelihood": "很可能",
+                        "success": "小明回了：「我这边下雪了。」",
+                        "failure": "手机一直没亮。",
+                    },
+                    "end": True,
+                }
+            ]
+        },
+        {"closing": {**CLOSING, "epilogue": "临睡前小明又发来一句晚安。"}},
+    ],
+    ids=["opening", "narration", "check-branch", "epilogue"],
+)
+async def test_background_model_cannot_speak_for_real_people(env, script):
+    """背景模型写“某某发来消息”会让她记住一段现实里没发生过的对话，必须拦下。"""
+    await chat_with(env.db)
+    await start_story(env)
+    script_scene(env, **script)
+    with pytest.raises(SceneFailed, match="现实里的人"):
+        await env.director.run(BOT)
+    assert await story_events(env.db) == []
+
+
+async def test_real_people_may_appear_in_private_notes_but_not_in_canon(env):
+    await chat_with(env.db)
+    await start_story(env)
+    script_scene(
+        env,
+        closing={
+            **CLOSING,
+            "canon": [
+                {"name": "小明", "category": "人物", "body": "她的网友，住在北方。"},
+                {"name": "茶", "category": "物品", "body": "小明寄来的一盒茶。"},
+                {"name": "便利店老板", "category": "人物", "body": "姓周，话少。"},
+            ],
+            "notes": [{"title": "寄来的茶", "body": "小明说寄了茶，还没到，也没给单号。"}],
+        },
+    )
+    await env.director.run(BOT)
+    assert [row["name"] for row in await env.store.canon(BOT) if row["origin"] == "play"] == [
+        "便利店老板"
+    ]
+    assert (await env.store.notes(BOT))[0]["body"] == "小明说寄了茶，还没到，也没给单号。"
+
+
+async def test_aliases_are_guarded_too(env):
+    await chat_with(env.db, fragment="明明说给我寄了一盒茶")
+    await start_story(env)
+    script_scene(env, opening={**OPENING, "narration": "明明发来一张雪景照片。"})
+    with pytest.raises(SceneFailed, match="「明明」"):
+        await env.director.run(BOT)
+
+
+async def test_names_the_background_model_was_never_shown_are_not_guarded(db, make_configs):
+    """聊天摘要关掉后它根本不知道这些名字；世界里碰巧有同名的人不该被误伤。"""
+    env = build_story(db, make_configs({"story": {"enabled": True, "chat_digest_items": 0}}))
+    await chat_with(db)
+    await start_story(env)
+    script_scene(env, opening={**OPENING, "narration": "楼下面馆的伙计小明冲你点了点头。"})
+    result = await env.director.run(BOT)
+    assert result.rounds == 1
+
+
+async def test_world_seed_wins_when_a_contact_shares_a_name_with_a_character(env):
+    await chat_with(env.db, name="阿澄", fragment="阿澄说周末想去海边")
+    await start_story(env)
+    script_scene(env, opening={**OPENING, "narration": "阿澄从房间里探出头，问你吃不吃夜宵。"})
+    result = await env.director.run(BOT)
+    assert result.rounds == 1
+
+
 # --------------------------------------------------------------------- 裁定骰
 CHECK_TURN = {
     "check": {
@@ -340,6 +439,30 @@ async def test_notes_and_scene_summaries_reach_the_next_scene(env):
     assert "她在便利店躲雨，买到最后一把伞。" in opening_prompt
     assert "[人物] 便利店老板：姓周，话少。" in opening_prompt
     assert "地点：便利店；在做：躲雨" in opening_prompt
+    # 上一场的结尾原样带上，好让新的一场接着写；但仍然只有她外显的言行
+    assert (
+        "# 上一场是这样收住的（接着它往下写，不要重演）\n"
+        "【她】我走进便利店，想买把伞。\n【旁白】店里只剩一把黑伞，你买下了它。"
+    ) in opening_prompt
+    assert "其实不想回去" not in "\n".join(env.llm.prompts("gm"))
+    assert "上一场是这样收住的" not in env.llm.prompts("gm")[0]  # 第一场没有上一场
+
+
+async def test_budget_line_tells_the_refill_pace(env):
+    await start_story(env)
+    script_scene(env)
+    await env.director.run(BOT)
+    assert "唤醒额度：剩 10.0 次（平均每 144 分钟回补 1 次，最多攒 30 次）" in env.llm.prompts("gm")[0]
+
+
+async def test_long_narration_is_cut_at_a_sentence_boundary(env):
+    await start_story(env)
+    long = "你沿着北门夜市往回走。" * 60  # 660 字，超过 400 的上限
+    script_scene(env, opening={**OPENING, "narration": long})
+    await env.director.run(BOT)
+    scene = await env.db.fetchone("SELECT transcript FROM story_scenes")
+    first = json.loads(scene["transcript"])[0]["text"]
+    assert len(first) <= 400 and first.endswith("。")
 
 
 async def test_lookup_results_come_back_on_the_next_call(env):
@@ -461,6 +584,23 @@ async def test_llm_retries_once_on_bad_output(env):
     value, attempts = await make_llm(provider, env.stack.audit).ask_json("gm", BOT, "系统", "用户")
     assert value == {"narration": "好"} and attempts == 2
     assert provider.requests[0] == {"prompt": "用户", "system_prompt": "系统", "contexts": []}
+    # 重试时告诉模型上一次错在哪
+    assert provider.requests[1]["prompt"] == (
+        "用户\n\n# 上一次输出不合格\n上一次没有只输出一个 JSON 对象。\n请按要求重新输出。"
+    )
+
+
+async def test_llm_retry_carries_the_validators_reason(env):
+    provider = FakeProvider(['{"narration": "小明发来消息"}', '{"narration": "手机没有动静"}'])
+
+    def validate(value):
+        return "叙述里不能出现小明" if "小明" in value["narration"] else True
+
+    value, attempts = await make_llm(provider, env.stack.audit).ask_json(
+        "gm", BOT, "系统", "用户", validate=validate
+    )
+    assert value == {"narration": "手机没有动静"} and attempts == 2
+    assert "# 上一次输出不合格\n叙述里不能出现小明" in provider.requests[1]["prompt"]
 
 
 async def test_llm_gives_up_after_retry(env):

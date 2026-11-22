@@ -17,7 +17,10 @@ ROLE_LABELS = {ROLE_GM: "背景模型", ROLE_ACTOR: "场景中的她"}
 
 # (role, bot_id) -> provider；provider 需要有 ``text_chat(prompt=, system_prompt=, contexts=)``
 ProviderResolver = Callable[[str, str], Awaitable[Any]]
-Validator = Callable[[dict[str, Any]], bool]
+# 返回 True 表示合格；返回 False 或一句原因表示不合格（原因会在重试时告诉模型）。
+Validator = Callable[[dict[str, Any]], "bool | str"]
+
+RETRY_FEEDBACK = "\n\n# 上一次输出不合格\n{reason}\n请按要求重新输出。"
 
 
 class StoryLLMError(Exception):
@@ -63,12 +66,15 @@ class StoryLLM:
 
         attempts = 0
         reason = ""
+        feedback = ""
         for _ in range(1 + self.retries):
             attempts += 1
             self.stats["calls"] += 1
+            # 重试时把上一次哪里不合格告诉模型，否则它多半会原样再错一遍。
+            prompt = user + RETRY_FEEDBACK.format(reason=feedback) if feedback else user
             try:
                 response = await provider.text_chat(
-                    prompt=user, system_prompt=system, contexts=[]
+                    prompt=prompt, system_prompt=system, contexts=[]
                 )
             except Exception as exc:  # noqa: BLE001 - 网络/限流等统一按失败重试
                 reason = f"调用失败：{type(exc).__name__}: {exc}"
@@ -78,14 +84,17 @@ class StoryLLM:
             value = extract_json(text)
             if not isinstance(value, dict):
                 reason = "输出不是 JSON 对象"
+                feedback = "上一次没有只输出一个 JSON 对象。"
                 self.audit.warn(
                     "故事模型输出不是 JSON 对象（%s）：%s", label, str(text or "")[:120]
                 )
                 continue
-            if validate is not None and not validate(value):
-                reason = "输出缺少必填内容"
+            verdict = validate(value) if validate is not None else True
+            if verdict is not True:
+                reason = verdict if isinstance(verdict, str) and verdict else "输出缺少必填内容"
+                feedback = reason
                 self.audit.warn(
-                    "故事模型输出缺少必填内容（%s）：%s", label, str(text or "")[:120]
+                    "故事模型输出不合格（%s）：%s｜%s", label, reason, str(text or "")[:120]
                 )
                 continue
             self.audit.debug(

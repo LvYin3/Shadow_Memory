@@ -114,8 +114,10 @@ class FakeStoryLLM:
         value = queue.pop(0)
         if isinstance(value, Exception):
             raise value
-        if validate is not None and not validate(value):
-            raise StoryLLMError(f"{role} 输出缺少必填内容", 2)
+        verdict = validate(value) if validate is not None else True
+        if verdict is not True:
+            reason = verdict if isinstance(verdict, str) else "输出缺少必填内容"
+            raise StoryLLMError(f"{role} {reason}", 2)
         return value, 1
 
 

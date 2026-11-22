@@ -254,6 +254,16 @@ class StoryStore:
             (bot_id, int(limit)),
         )
 
+    async def last_transcript(self, bot_id: str) -> list[dict[str, Any]]:
+        """上一场演成了的场景的完整转录（含她的内心，给谁看由调用方筛）。"""
+        row = await self.db.fetchone(
+            "SELECT transcript FROM story_scenes WHERE bot_id=? AND status='ok' "
+            "ORDER BY id DESC LIMIT 1",
+            (bot_id,),
+        )
+        transcript = _loads((row or {}).get("transcript"), [])
+        return [turn for turn in transcript if isinstance(turn, dict)] if isinstance(transcript, list) else []
+
     async def scene_count(self, bot_id: str) -> int:
         value = await self.db.scalar(
             "SELECT COUNT(*) FROM story_scenes WHERE bot_id=? AND status='ok'",
