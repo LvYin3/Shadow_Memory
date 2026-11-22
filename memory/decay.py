@@ -38,18 +38,23 @@ class Decayer:
             (bot_id,),
         )
         archived = 0
+        updates: list[tuple[float, float, Any, int]] = []
         for row in rows:
             strength = self.dynamics.decay(float(row.get("storage_strength") or 0.0))
             r_value = self.dynamics.r(
                 strength, row.get("last_recalled_at") or row.get("ended_at"), stamp
             )
             doomed = self.dynamics.should_archive(strength)
-            await self.db.execute(
-                "UPDATE events SET storage_strength=?, retrievability=?, status=? WHERE id=?",
-                (strength, r_value, "archived" if doomed else row.get("status"), int(row["id"])),
+            updates.append(
+                (strength, r_value, "archived" if doomed else row.get("status"), int(row["id"]))
             )
             if doomed:
                 archived += 1
+        # 先算好再一次写回：事件上千后逐行更新会很慢。
+        await self.db.executemany(
+            "UPDATE events SET storage_strength=?, retrievability=?, status=? WHERE id=?",
+            updates,
+        )
         facts_archived = await self.facts.decay(bot_id, stamp)
         self.audit.event(
             "decay",

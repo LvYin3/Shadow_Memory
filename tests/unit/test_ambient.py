@@ -154,6 +154,69 @@ async def test_people_backfill_and_close_update(ambient, db):
     assert len(row["last_topic"]) <= 20
 
 
+async def test_backfill_takes_each_persons_latest_turn_only(ambient, db, monkeypatch):
+    """回填在 SQL 里按人取最近一条，不把全部发言读进内存。"""
+    old = await _event(db, fragment="小明说在找工作", ended_at=NOW - 5 * DAY)
+    new = await _event(db, fragment="明明说找到工作了", ended_at=NOW - DAY)
+    for index in range(120):
+        await db.execute(
+            "INSERT INTO event_turns(event_id, seq, role, speaker_id, speaker_name, text, ts) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (old, index + 1, "user", "u1", "小明", "……", NOW - 5 * DAY + index),
+        )
+    await _turn(db, new, "明明", speaker_id="u1", ts=NOW - DAY)  # 同一个人改了昵称
+    await _turn(db, old, "阿绿", speaker_id="", ts=NOW - 5 * DAY)  # 只有名字、没有 id
+    await db.execute(
+        "INSERT INTO event_turns(event_id, seq, role, speaker_id, speaker_name, text, ts) "
+        "VALUES(?,?,?,?,?,?,?)",
+        (old, 999, "assistant", "", "", "我说的话不算人", NOW),
+    )
+
+    fetched: list[int] = []
+    original = db.fetchall
+
+    async def counting(sql, params=()):
+        rows = await original(sql, params)
+        if "event_turns" in sql:
+            fetched.append(len(rows))
+        return rows
+
+    monkeypatch.setattr(db, "fetchall", counting)
+    snap = await ambient.snapshot("bot1")
+    assert fetched == [2]  # 122 条用户发言，只取回两个人各一行
+    people = {row["person_id"]: row for row in await original("SELECT * FROM people")}
+    assert set(people) == {"u1", "阿绿"}
+    assert people["u1"]["name"] == "明明"
+    assert people["u1"]["last_topic"] == "明明说找到工作了"
+    assert people["u1"]["last_seen"] == NOW - DAY
+    assert people["阿绿"]["last_topic"] == "小明说在找工作"
+    assert {row["name"] for row in snap.people} == {"明明", "阿绿"}
+
+
+async def test_backfill_leaves_known_people_alone(db, configs):
+    """已经在 people 里的人由事件关闭时更新，重启后的回填不再覆盖他们。"""
+    event_id = await _event(db, fragment="小明说搬家了")
+    await _turn(db, event_id, "小明")
+    await db.execute(
+        "INSERT INTO people(bot_id, person_id, name, aliases, last_topic, last_seen, "
+        "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
+        ("bot1", "u1", "小明", '["明明"]', "更新过的话题", NOW + 5, NOW, NOW),
+    )
+    service = AmbientService(db, configs, FakeJev(), _audit(), now_fn=lambda: NOW)
+    await service.snapshot("bot1")
+    row = await db.fetchone("SELECT * FROM people WHERE bot_id='bot1' AND person_id='u1'")
+    assert (row["last_topic"], row["aliases"], row["last_seen"]) == (
+        "更新过的话题",
+        '["明明"]',
+        NOW + 5,
+    )
+    # 另一个机器人的同名联系人不受影响，照常回填
+    other = await _event(db, fragment="小明说要出差", bot_id="bot2")
+    await _turn(db, other, "小明")
+    await service.snapshot("bot2")
+    assert await db.scalar("SELECT last_topic FROM people WHERE bot_id='bot2'") == "小明说要出差"
+
+
 async def test_promotion_requires_salience_and_threshold(db, configs):
     jev = FakeJev(noul=0.8)
     service = AmbientService(db, configs, jev, _audit(), now_fn=lambda: NOW)

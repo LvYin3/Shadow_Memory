@@ -174,6 +174,33 @@ async def test_nested_transaction_in_same_task_is_rejected(db):
     assert await db.kv_get("b", "after") == "v"
 
 
+async def test_executemany_is_all_or_nothing(db):
+    rows = [("b", "note", "一", 1, 1), ("b", "weird", "二", 1, 1)]  # 第二行违反 kind 的约束
+    with pytest.raises(sqlite3.IntegrityError):
+        await db.executemany(
+            "INSERT INTO notes(bot_id, kind, body, created_at, updated_at) VALUES(?,?,?,?,?)", rows
+        )
+    assert await db.scalar("SELECT COUNT(*) FROM notes") == 0
+    # 出错后连接仍然可用，没有留下半开的事务
+    await db.executemany(
+        "INSERT INTO notes(bot_id, kind, body, created_at, updated_at) VALUES(?,?,?,?,?)", rows[:1]
+    )
+    assert await db.scalar("SELECT COUNT(*) FROM notes") == 1
+    await db.executemany("DELETE FROM notes WHERE id=?", [])  # 空批次什么也不做
+    assert await db.scalar("SELECT COUNT(*) FROM notes") == 1
+
+
+async def test_executemany_joins_an_open_transaction(db):
+    with pytest.raises(RuntimeError):
+        async with db.transaction():
+            await db.executemany(
+                "INSERT INTO kv(bot_id, key, value, updated_at) VALUES(?,?,?,?)",
+                [("b", "k1", "v", 1), ("b", "k2", "v", 1)],
+            )
+            raise RuntimeError("boom")
+    assert await db.scalar("SELECT COUNT(*) FROM kv") == 0
+
+
 async def test_kv_upsert(db):
     await db.kv_set("b", "k", "1", 1)
     await db.kv_set("b", "k", "2", 2)

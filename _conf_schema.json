@@ -173,7 +173,7 @@
       "topic_end_threshold": {"type": "float", "description": "话题结束阈值", "default": 0.7},
       "big_event_chars": {"type": "int", "description": "大事件字数阈值（触发摘要/摘录）", "default": 20000},
       "big_event_turns": {"type": "int", "description": "大事件轮数阈值", "default": 80},
-      "sweeper_seconds": {"type": "int", "description": "空闲事件巡检间隔（秒）", "default": 300},
+      "sweeper_seconds": {"type": "int", "description": "空闲事件巡检间隔（秒），最小 60", "default": 300},
       "turn_context_turns": {"type": "int", "description": "写碎片时使用的最近轮数", "default": 30}
     }
   },

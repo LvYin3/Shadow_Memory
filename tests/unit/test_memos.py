@@ -83,12 +83,40 @@ async def test_create_recurring(memos):
     assert call["run_once"] is False
 
 
-async def test_get_marks_fired(memos):
+async def test_get_marks_fired_only_when_woken_by_its_own_job(memos):
     await memos.create("bot1", note="提醒", umo="umo1", run_at=_iso(3600))
-    row = await memos.get("bot1", 1)
+    row = await memos.get("bot1", 1, waking_job_id="job-1")
     assert row is not None
     assert row["fired_at"] is not None
     assert row["status"] == "fired"
+    assert await memos.pending("bot1") == []
+
+
+async def test_peeking_at_a_memo_does_not_mark_it_fired(memos):
+    """模型平时查看、或被别的备忘叫醒时顺手查看，都不能把还没到点的备忘标成已触发。"""
+    await memos.create("bot1", note="提醒A", umo="umo1", run_at=_iso(3600))
+    await memos.create("bot1", note="提醒B", umo="umo1", run_at=_iso(7200))
+    for waking in ("", "job-2", "someone-else"):
+        row = await memos.get("bot1", 1, waking_job_id=waking)
+        assert row["fired_at"] is None and row["status"] == "scheduled"
+    assert [item["id"] for item in await memos.pending("bot1")] == [1, 2]
+    # 到点后由它自己的任务叫醒，才算触发
+    row = await memos.get("bot1", 1, waking_job_id="job-1")
+    assert row["status"] == "fired"
+    assert [item["id"] for item in await memos.pending("bot1")] == [2]
+
+
+async def test_recurring_memo_stays_scheduled_after_firing(memos):
+    await memos.create("bot1", note="每天提醒", umo="umo1", cron="30 3 * * *")
+    row = await memos.get("bot1", 1, waking_job_id="job-1")
+    assert row["fired_at"] is not None and row["status"] == "scheduled"
+
+
+async def test_edited_memo_fires_on_its_new_job(memos):
+    await memos.create("bot1", note="提醒", umo="umo1", run_at=_iso(3600))
+    await memos.edit("bot1", 1, run_at=_iso(7200))
+    assert (await memos.get("bot1", 1, waking_job_id="job-1"))["status"] == "scheduled"
+    assert (await memos.get("bot1", 1, waking_job_id="job-2"))["status"] == "fired"
 
 
 async def test_get_missing_returns_none(memos):

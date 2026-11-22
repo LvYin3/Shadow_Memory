@@ -668,11 +668,11 @@ class Main(Star):
                 raise
             except Exception as exc:  # noqa: BLE001
                 self.audit.warn("蒸馏巡检失败：%s", exc)
-            interval = max(30, self.cfg("").int("persona.distill_check_seconds", 300, lo=30, hi=3600))
+            interval = self.cfg("").int("persona.distill_check_seconds", 300, lo=30, hi=3600)
             await asyncio.sleep(interval)
 
     async def _sweeper_loop(self) -> None:
-        interval = max(60, self.cfg("").int("memory.sweeper_seconds", 300, lo=30, hi=3600))
+        interval = self.cfg("").int("memory.sweeper_seconds", 300, lo=60, hi=3600)
         while True:
             await asyncio.sleep(interval)
             try:
@@ -2055,7 +2055,12 @@ class Main(Star):
                 )
                 return "改好了。"
             if action == "get":
-                row = await self.memos.get(bot_id, int(memo_id or 0))
+                # 只有被这条备忘自己的定时任务叫醒时，读取才算“已触发”。
+                cron_job = event.get_extra("cron_job")
+                waking = str(cron_job.get("id") or "") if isinstance(cron_job, dict) else ""
+                row = await self.memos.get(
+                    bot_id, int(memo_id or 0), waking_job_id=waking
+                )
                 if row is None:
                     return "没有这条提醒。"
                 return await self._memo_context(row, event)

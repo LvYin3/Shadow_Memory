@@ -491,10 +491,25 @@ class Database:
         return await self._run(_do)
 
     async def executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> None:
+        """批量执行：一次拿锁、一次线程切换、一次提交；中途出错整批回滚。
+
+        已经在 ``transaction()`` 里时并入外层事务，由外层决定提交还是回滚。
+        """
         data = [tuple(row) for row in rows]
+        if not data:
+            return
 
         def _do() -> None:
-            self.conn.executemany(sql, data)
+            if self.conn.in_transaction:
+                self.conn.executemany(sql, data)
+                return
+            self.conn.execute("BEGIN")
+            try:
+                self.conn.executemany(sql, data)
+            except BaseException:
+                self.conn.execute("ROLLBACK")
+                raise
+            self.conn.execute("COMMIT")
 
         await self._run(_do)
 
@@ -555,12 +570,9 @@ class Database:
 
     # ------------------------------------------------------------------ 迁移
     async def _migrate(self) -> None:
-        version = await self.scalar("PRAGMA user_version", default=0) or 0
         await self._run(lambda: self.conn.executescript(DDL))
         await self._ensure_columns()
         await self._run(lambda: self.conn.executescript(DDL_INDEXES))
-        if version < 2:
-            await self._ensure_columns()
         try:
             await self._run(
                 lambda: self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")

@@ -190,33 +190,33 @@ class AmbientService:
         if bot_id in self._backfilled:
             return
         self._backfilled.add(bot_id)
+        # 只回填还不在 people 里的人，每人只取最近的一条发言，筛选都在 SQL 里做完。
+        # 以前是把这个机器人全部用户发言读进内存再去重，数据多了重启后第一条回复会很慢。
+        # （GROUP BY 配 MAX(ts) 时，SQLite 会让其余列取自 ts 最大的那一行。）
         try:
             rows = await self.db.fetchall(
-                "SELECT t.speaker_id, t.speaker_name, t.ts, e.fragment, e.summary "
-                "FROM event_turns t JOIN events e ON e.id=t.event_id "
-                "WHERE e.bot_id=? AND e.status='closed' AND t.role='user' "
-                "ORDER BY t.ts DESC",
-                (bot_id,),
+                "SELECT pid, speaker_name, MAX(ts) AS ts, fragment, summary FROM ("
+                "  SELECT COALESCE(NULLIF(TRIM(COALESCE(t.speaker_id, '')), ''), "
+                "                  NULLIF(TRIM(COALESCE(t.speaker_name, '')), '')) AS pid, "
+                "         t.speaker_name, t.ts, e.fragment, e.summary "
+                "  FROM event_turns t JOIN events e ON e.id=t.event_id "
+                "  WHERE e.bot_id=? AND e.status='closed' AND t.role='user'"
+                ") WHERE pid IS NOT NULL "
+                "AND pid NOT IN (SELECT person_id FROM people WHERE bot_id=?) "
+                "GROUP BY pid",
+                (bot_id, bot_id),
             )
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("常驻人物回填失败：%s", exc)
             return
-        seen: set[str] = set()
         for row in rows:
-            person_id = str(row.get("speaker_id") or "").strip()
             name = str(row.get("speaker_name") or "").strip()
-            if not person_id and not name:
-                continue
-            person_id = person_id or name
-            if person_id in seen:
-                continue
-            seen.add(person_id)
             topic = self._topic(
                 str(row.get("fragment") or row.get("summary") or ""),
                 20,
             )
             await self._upsert_person(
-                bot_id, person_id, name or "对方", topic, int(row.get("ts") or 0)
+                bot_id, str(row["pid"]), name or "对方", topic, int(row.get("ts") or 0)
             )
 
     async def _upsert_person(

@@ -260,6 +260,7 @@ class FactService:
             (bot_id,),
         )
         archived = 0
+        updates: list[tuple[float, float, int, int]] = []
         for row in rows:
             strength = self.dynamics.decay(float(row.get("storage_strength") or 0.0))
             r_value = self.dynamics.r(
@@ -268,12 +269,13 @@ class FactService:
                 now,
             )
             doomed = self.dynamics.should_archive(strength)
-            await self.db.execute(
-                "UPDATE facts SET storage_strength=?, retrievability=?, archived=? WHERE id=?",
-                (strength, r_value, 1 if doomed else 0, int(row["id"])),
-            )
+            updates.append((strength, r_value, 1 if doomed else 0, int(row["id"])))
             if doomed:
                 archived += 1
+        await self.db.executemany(
+            "UPDATE facts SET storage_strength=?, retrievability=?, archived=? WHERE id=?",
+            updates,
+        )
         return archived
 
     async def stats(self, bot_id: str) -> dict[str, int]:

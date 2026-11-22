@@ -203,56 +203,33 @@ class MemoryService:
         )
         answers = None
         if getattr(self.jev, "available", False):
-            answers = await self.jev.ask(
-                judge_state,
-                {
-                    "salience": {
-                        "type": "score",
-                        "instructions": prompts.SALIENCE_INSTRUCTION,
-                        "criteria": prompts.SALIENCE_LEVELS,
-                    },
-                    "conflict": {
-                        "type": "noul",
-                        "instructions": prompts.CONFLICT_INSTRUCTION,
-                    },
-                    "durable_fact": {
-                        "type": "noul",
-                        "instructions": prompts.DURABLE_FACT_INSTRUCTION,
-                    },
-                    "topic_end": {
-                        "type": "noul",
-                        "instructions": prompts.TOPIC_END_INSTRUCTION,
-                    },
+            questions = {
+                "salience": {
+                    "type": "score",
+                    "instructions": prompts.SALIENCE_INSTRUCTION,
+                    "criteria": prompts.SALIENCE_LEVELS,
                 },
-            )
+                "conflict": {
+                    "type": "noul",
+                    "instructions": prompts.CONFLICT_INSTRUCTION,
+                },
+                "durable_fact": {
+                    "type": "noul",
+                    "instructions": prompts.DURABLE_FACT_INSTRUCTION,
+                },
+                "topic_end": {
+                    "type": "noul",
+                    "instructions": prompts.TOPIC_END_INSTRUCTION,
+                },
+            }
+            answers = await self.jev.ask(judge_state, questions)
             if not answers and judge_state is not state:
                 self.audit.debug(
                     "decision_context_fallback",
                     scope="post_turn",
                     reason="jev_failed",
                 )
-                answers = await self.jev.ask(
-                    state,
-                    {
-                        "salience": {
-                            "type": "score",
-                            "instructions": prompts.SALIENCE_INSTRUCTION,
-                            "criteria": prompts.SALIENCE_LEVELS,
-                        },
-                        "conflict": {
-                            "type": "noul",
-                            "instructions": prompts.CONFLICT_INSTRUCTION,
-                        },
-                        "durable_fact": {
-                            "type": "noul",
-                            "instructions": prompts.DURABLE_FACT_INSTRUCTION,
-                        },
-                        "topic_end": {
-                            "type": "noul",
-                            "instructions": prompts.TOPIC_END_INSTRUCTION,
-                        },
-                    },
-                )
+                answers = await self.jev.ask(state, questions)
         if answers:
             score = float(answers.get("salience", {}).get("score", 1.0))
             output.salience = min(5, max(1, int(round(score)) + 1))

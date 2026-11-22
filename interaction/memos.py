@@ -96,13 +96,22 @@ class MemoService:
             (bot_id, max(1, int(limit))),
         )
 
-    async def get(self, bot_id: str, memo_id: int) -> dict[str, Any] | None:
+    async def get(
+        self, bot_id: str, memo_id: int, *, waking_job_id: str = ""
+    ) -> dict[str, Any] | None:
+        """读一条备忘。
+
+        只有“这条备忘自己的定时任务把模型叫醒后来读”才算触发（``waking_job_id`` 等于它的
+        任务 id）。模型平时主动查看、或者被别的备忘叫醒时顺手查看，都不改状态；否则还没到点
+        的备忘会被提前标成已触发，从待办里消失。
+        """
         row = await self.db.fetchone(
             "SELECT * FROM memos WHERE id=? AND bot_id=?", (int(memo_id), bot_id)
         )
         if row is None:
             return None
-        if row.get("fired_at") is None:
+        woke = bool(waking_job_id) and str(row.get("job_id") or "") == str(waking_job_id)
+        if woke and row.get("fired_at") is None:
             await self.db.execute(
                 "UPDATE memos SET fired_at=?, status=CASE WHEN cron IS NULL THEN 'fired' ELSE "
                 "'scheduled' END, skip_reason=NULL WHERE id=?",
