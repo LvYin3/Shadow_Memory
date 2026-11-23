@@ -299,7 +299,7 @@ TRANSCRIPT = [
 
 def test_gm_never_sees_her_inner_thoughts():
     """背景模型只读外显：她心里想的不能出现在给它的转录里。"""
-    rendered = prompts.render_transcript(TRANSCRIPT, viewer="gm")
+    rendered = prompts.render_transcript(TRANSCRIPT, viewer="gm", style="second")
     assert "其实不想回去" not in rendered
     assert rendered == "【旁白】你站在便利店门口，雨下大了。\n【她】我走进去，想买把伞。"
 
@@ -324,13 +324,15 @@ def test_actor_prompt_assembly():
 
 
 def test_narration_styles():
-    assert prompts.narration(None).key == "second" == prompts.narration("nonsense").key
-    assert prompts.narration(" First ").key == "first"
-    # 默认（第二人称）与改造前逐字一致
-    assert "叙述用第二人称，称她为“你”" in prompts.GM_SYSTEM == prompts.gm_system("second")
+    assert prompts.narration(None).key == "first" == prompts.narration("nonsense").key
+    assert prompts.narration(" Second ").key == "second"
+    assert prompts.GM_SYSTEM == prompts.gm_system("first")
     assert "<<" not in prompts.GM_SYSTEM and "<<" not in prompts.GM_OPEN_TASK_BACKFILL
-    assert "用“你”来写" in prompts.GM_OPEN_TASK_BACKFILL
-    assert "用“你”来写" in prompts.gm_close_task(min_wake=1, max_wake=2)
+    assert "用“我”来写" in prompts.GM_OPEN_TASK_BACKFILL
+    assert "用“我”来写" in prompts.gm_close_task(min_wake=1, max_wake=2)
+    second = prompts.gm_system("second")
+    assert "叙述用第二人称，称她为“你”" in second and "这个“我”不是你" not in second
+    assert "用“你”来写" in prompts.gm_close_task(min_wake=1, max_wake=2, style="second")
 
     first = prompts.gm_system("first")
     assert "叙述用第一人称" in first and "只写感知" in first and "第二人称" not in first
@@ -352,7 +354,7 @@ def test_narration_styles():
         assert f"- {tag}写的是我此刻看到、听到、感觉到的" in system
         assert "{" not in system.replace('{"inner"', "")
     assert "里面的“你”就是我" in prompts.actor_system(
-        base_card="", persona="", ambient="", moment="x"
+        base_card="", persona="", ambient="", moment="x", style="second"
     )
     assert "【我】后面才是我自己想的和做的" in prompts.actor_system(
         base_card="", persona="", ambient="", moment="x", style="first"

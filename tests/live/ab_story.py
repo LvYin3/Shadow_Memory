@@ -7,7 +7,7 @@
         --tag narration --arm "second:narration=second" --arm "first:narration=first"
 
 每个 ``--arm`` 是 ``名字:键=值,键=值``，可用的键：
-- ``narration``：second / first / none（默认 second）
+- ``narration``：second / first / none（默认 first）
 - ``gm`` / ``actor``：背景模型 / 她用的模型（默认 DSH_TEST_TEXT_MODEL）
 - ``thinking``：背景模型的思考开关 default / on / off（默认 default，按模型自己的默认）
 - ``past``：开场最多带几条更早的场景（默认 3，0 关掉）
@@ -84,7 +84,7 @@ QUOTED = re.compile(r"“[^”]*”|「[^」]*」|\"[^\"]*\"|『[^』]*』")
 @dataclass(frozen=True, slots=True)
 class Arm:
     name: str
-    narration: str = "second"
+    narration: str = "first"
     gm: str = ""
     actor: str = ""
     thinking: str = "default"

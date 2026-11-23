@@ -118,9 +118,11 @@ AstrBot cron 唤醒不触发 `on_llm_request`，所以备忘轮到点时靠 `mem
 **日志：**
 
 - INFO：`story_scene`（一场演完：轮数、调用次数、掷骰次数、显著度、新增设定、下次唤醒间隔、剩余额度）、`story_wait_tokens`、`story_enabled` / `story_disabled` / `story_paused` / `story_resumed`、`story_seed_imported`；
-- WARN：`故事场景失败`、`故事模型调用失败`、`故事模型输出不是 JSON 对象`、`故事模型输出不合格`（后面带原因，例如叙述里出现了现实联系人的名字）、`故事模块配置的 provider 不可用`；
+- WARN：`故事场景失败`、`故事模型调用失败`、`故事模型输出不是 JSON 对象`、`故事模型输出不合格`（后面带原因，例如叙述里出现了现实联系人的名字，或第一人称叙述里替她说了话）、`故事模块配置的 provider 不可用`、`背景模型回想旧场景失败`（判断模型出错，这一场退回字面匹配）；
 - ERROR：`故事连续 N 次失败，已自动暂停`；
-- DEBUG：`story_llm`（每次调用的角色与字数）、`environment_injected` 的 `story_lines`（状态卡注入了几行）。
+- DEBUG：`story_llm`（每次调用的角色与字数）、`story_past`（开场回想更早场景：候选几条、带上几条、每条的得分；`reason` 为 `judged` 是判断模型挑的，`literal` 是退回了字面匹配）、`environment_injected` 的 `story_lines`（状态卡注入了几行）。
+
+**背景模型忘了很早以前的事：** 最近 `recent_scenes` 场每次都带；更早的看 DEBUG 里的 `story_past`。没有这条日志说明还没有更早的场景，或 `past_scenes` 为 0；有日志但 `picked` 为 0，说明判断模型认为都用不上（得分都低于 `past_threshold`）。设定集和主持人笔记是另一条路：笔记按更新时间带，超过 `notes_max_chars` 的较早笔记不带，背景模型可以在 `lookup` 里写笔记标题去查。
 
 **她在聊天里不提自己的生活：** 状态卡只是背景，不要求她主动说。确认 `environment_injected` 的 `story_lines > 0`；为 0 说明故事没开、状态卡已过期超过 `card_stale_hours`，或关了 `interaction.environment`。
 
@@ -179,7 +181,7 @@ $env:PYTHONPATH=".pydeps"
 - `tests/unit/`：模块与纯逻辑；
 - `tests/integration/`：整条记忆链路；`test_story_main_wiring.py` 用 AstrBot 替身把 `main.py` 真正导入并跑一遍故事的接线；
 - `tests/contract/`：AstrBot 接口与工具 schema；
-- `tests/live/`：可选的真实模型冒烟。`smoke_story.py` 用真实模型连演几场故事并打印经过、骰子、状态卡和调用统计，只读环境变量 `DSH_TEST_TEXT_BASE_URL` / `DSH_TEST_TEXT_API_KEY` / `DSH_TEST_TEXT_MODEL`，数据写在临时库里；`--narration second|first|none` 换叙述人称，`--start 2026-11-23T08:00` 指定起始时间。
+- `tests/live/`：可选的真实模型冒烟。`smoke_story.py` 用真实模型连演几场故事并打印经过、骰子、状态卡和调用统计，只读环境变量 `DSH_TEST_TEXT_BASE_URL` / `DSH_TEST_TEXT_API_KEY` / `DSH_TEST_TEXT_MODEL`，数据写在临时库里；`--narration first|second|none` 换叙述人称，`--start 2026-11-23T08:00` 指定起始时间，`--gm-model` / `--actor-model` 分别换背景模型和她的模型，`--gm-thinking on|off` 切 DeepSeek 的思考模式；设了 `DSH_TEST_JEV_BASE_URL` / `DSH_TEST_JEV_API_KEY` / `DSH_TEST_JEV_MODEL` 时用真实判断模型。`ab_story.py` 把几组配置（人称、背景模型、思考开关、旧场景回想）各演几条时间线，再用审稿模型逐条审越界；`story_memory.py` 在演好的历史上用手写探针测背景模型回想旧场景的命中率和端到端一致性。
 
 ## 已知取舍
 

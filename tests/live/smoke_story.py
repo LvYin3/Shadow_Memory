@@ -266,7 +266,7 @@ async def main() -> int:
     parser.add_argument("--seed", type=int, default=None, help="随机种子（骰子与偶然种子）")
     parser.add_argument("--no-chat", action="store_true")
     parser.add_argument(
-        "--narration", default="second", choices=["second", "first", "none"],
+        "--narration", default="first", choices=["second", "first", "none"],
         help="背景模型的叙述人称",
     )
     parser.add_argument("--start", default="", help="起始时间，如 2026-11-23T08:00；默认现在")

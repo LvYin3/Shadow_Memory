@@ -559,10 +559,19 @@ class Director:
 
         # 更早的场景不衰减：粗筛后让判断模型挑出演下一场时值得想起的。
         # 判断模型只看这里给的外显信息，不看她的人格和记忆。
+        # 粗筛只看此刻的处境；混进最近几场的梗概，字面上就总是那几场最像。
         pick = await self.past.pick(
             bot_id,
             skip=recent_count,
-            query=f"{situation} {last_ending}",
+            query=" ".join(
+                [
+                    card.where if card else "",
+                    card.doing if card else "",
+                    str(opening.get("where") or ""),
+                    str(opening.get("doing") or ""),
+                    last_ending,
+                ]
+            ),
             state={
                 "now": moment,
                 "her_status": card_text,
@@ -570,8 +579,8 @@ class Director:
                 "last_ending": last_ending[:400],
             },
             limit=cfg.int("story.past_scenes", 3, lo=0, hi=10),
-            candidates=cfg.int("story.past_candidates", 10, lo=1, hi=30),
-            threshold=cfg.float("story.past_threshold", 0.5, lo=0.0, hi=1.0),
+            candidates=cfg.int("story.past_candidates", 30, lo=1, hi=60),
+            threshold=cfg.float("story.past_threshold", 0.6, lo=0.0, hi=1.0),
         )
         if pick.judged:
             progress.calls += 1

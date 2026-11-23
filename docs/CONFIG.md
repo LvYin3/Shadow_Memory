@@ -294,17 +294,19 @@ provider_ltm_settings.group_message_history_enable: false
   "canon_context_items": 8,    // 每次预取给背景模型的相关设定条数
   "recent_scenes": 3,          // 给背景模型看的最近场景梗概条数
   "past_scenes": 3,            // 开场最多再带几条更早的相关场景；0 = 不带
-  "past_candidates": 10,       // 挑更早场景时先粗筛出的候选数
-  "past_threshold": 0.5,       // 判断模型认为“有用”的概率达到多少才带上
+  "past_candidates": 30,       // 挑更早场景时先粗筛出的候选数
+  "past_threshold": 0.6,       // 判断模型认为“有用”的概率达到多少才带上
   "chat_digest_items": 5,      // 给背景模型看的最近聊天事件条数；0 = 不发
   "notes_max_chars": 2000,     // 每次带给背景模型的主持人笔记总字数
   "card_stale_hours": 6,       // 状态卡过期多久后不再注入聊天
   "chat_boundary": true,       // 聊天时提醒她不把没发生的事说成已发生
-  "narration": "second"        // 背景模型写给她看的叙述用什么人称：second / first / none
+  "narration": "first"         // 背景模型写给她看的叙述用什么人称：first / second / none
 }
 ```
 
-`narration` 的三种取值：`second` 称她为“你”（默认）；`first` 以她的口吻写“我”看到听到的事；`none` 不带人称，直接写现场。三种只影响叙述怎么写，不影响记忆（她记下的始终是第一人称）。用 deepseek-chat 各演过两轮、每轮二十场：提示词收紧后三种的越界次数都很低，分不出高下；收紧之前，第一人称下背景模型替她行动、替她说话的次数明显更多。换人称后建议用 `tests/live/smoke_story.py --narration first` 在自己的模型上先看几场。
+`narration` 的三种取值：`first` 以她的口吻写“我”看到、听到的事（默认）；`second` 称她为“你”；`none` 不带人称，直接写现场。三种只影响叙述怎么写，不影响记忆（她记下的始终是第一人称）。第一人称下，提示词会向背景模型说明这个“我”不是它自己，用第一人称只是为了让扮演她的模型更容易代入；叙述里出现“我说：“……””这类替她开口的句子会被拦下重写。用 deepseek-chat 对照过第一人称和第二人称，各演 20 场：越界都很少，第一人称没有比第二人称更多（复核后第一人称 0 处实质越界、2 处顺手的小动作，第二人称 1 处替她做了起床的决定）。换人称后建议用 `tests/live/smoke_story.py --narration second` 在自己的模型上先看几场。
+
+背景模型要不要开思考：用 deepseek-chat、deepseek-flash（关思考）、deepseek-flash（开思考）各演 20 场，越界、打回、轮数和设定登记都差不多，开思考后背景模型每次输出约多 3 倍 token、耗时约翻倍。不建议为故事专门开思考模式。
 
 ### 一次唤醒做什么、花多少
 

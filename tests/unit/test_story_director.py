@@ -317,7 +317,8 @@ async def test_first_person_perception_is_not_mistaken_for_speech(db, make_confi
     assert (await env.director.run(BOT)).rounds == 1
 
 
-async def test_speech_guard_only_applies_to_first_person(env):
+async def test_speech_guard_only_applies_to_first_person(db, make_configs):
+    env = build_story(db, make_configs({"story": {"enabled": True, "narration": "second"}}))
     await start_story(env)
     script_scene(env, turns=[{**PLAIN_TURN, "narration": SPOKEN}])
     assert (await env.director.run(BOT)).rounds == 1
@@ -417,7 +418,7 @@ async def test_gap_is_backfilled_once_with_lowest_salience(env):
     assert "距上一场结束：3 小时 20 分钟。" in opening_prompt
     assert opening_prompt.endswith(prompts.GM_OPEN_TASK_BACKFILL)
     # 她在场景里先读到补叙
-    assert "【旁白】你在便利店等雨停，后来撑着伞走回了合租屋。" in env.llm.prompts("actor")[1]
+    assert "【眼前】你在便利店等雨停，后来撑着伞走回了合租屋。" in env.llm.prompts("actor")[1]
 
     backfill = await env.db.fetchone("SELECT * FROM events WHERE id=?", (result.backfill_event_id,))
     assert (backfill["source"], backfill["salience"], backfill["status"]) == ("story", 1, "closed")
@@ -501,7 +502,7 @@ async def test_notes_and_scene_summaries_reach_the_next_scene(env):
     # 上一场的结尾原样带上，好让新的一场接着写；但仍然只有她外显的言行
     assert (
         "# 上一场是这样收住的（接着它往下写，不要重演）\n"
-        "【她】我走进便利店，想买把伞。\n【旁白】店里只剩一把黑伞，你买下了它。"
+        "【她】我走进便利店，想买把伞。\n【眼前】店里只剩一把黑伞，你买下了它。"
     ) in opening_prompt
     assert "其实不想回去" not in "\n".join(env.llm.prompts("gm"))
     assert "上一场是这样收住的" not in env.llm.prompts("gm")[0]  # 第一场没有上一场

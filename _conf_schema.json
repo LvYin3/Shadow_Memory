@@ -374,13 +374,13 @@
       "canon_context_items": {"type": "int", "description": "每次唤醒预取给背景模型的相关设定条数", "default": 8},
       "recent_scenes": {"type": "int", "description": "给背景模型看的最近场景梗概条数", "default": 3},
       "past_scenes": {"type": "int", "description": "开场时最多带给背景模型几条更早的相关场景", "hint": "从最近几场之前的场景里挑，由判断模型逐条判断有没有用；0 表示不带。判断模型会收到候选场景的梗概、她的状态卡和最近几场的经过。", "default": 3},
-      "past_candidates": {"type": "int", "description": "挑更早场景时先粗筛出多少条候选交给判断模型", "default": 10},
-      "past_threshold": {"type": "float", "description": "更早场景被判断为“有用”的概率达到多少才带上", "default": 0.5},
+      "past_candidates": {"type": "int", "description": "挑更早场景时先粗筛出多少条候选交给判断模型", "default": 30},
+      "past_threshold": {"type": "float", "description": "更早场景被判断为“有用”的概率达到多少才带上", "default": 0.6},
       "chat_digest_items": {"type": "int", "description": "给背景模型看的最近聊天事件条数（碎片与摘要）", "hint": "0 表示不把聊天内容发给背景模型。", "default": 5},
       "notes_max_chars": {"type": "int", "description": "每次带给背景模型的主持人笔记总字数上限", "default": 2000},
       "card_stale_hours": {"type": "int", "description": "状态卡过了预计结束时间多少小时后不再注入聊天", "default": 6},
       "chat_boundary": {"type": "bool", "description": "聊天时提醒她只说现状、往事与打算，不把没发生的事说成已经发生", "default": true},
-      "narration": {"type": "string", "description": "背景模型写给她看的叙述用什么人称", "hint": "second：第二人称“你”；first：第一人称“我”，只写感知；none：不带人称，直接写现场。", "options": ["second", "first", "none"], "default": "second"}
+      "narration": {"type": "string", "description": "背景模型写给她看的叙述用什么人称", "hint": "second：第二人称“你”；first：第一人称“我”，只写感知；none：不带人称，直接写现场。", "options": ["second", "first", "none"], "default": "first"}
     }
   },
   "logging": {

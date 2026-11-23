@@ -62,7 +62,7 @@ NARRATIONS: dict[str, Narration] = {
         actor_line="{tag}写的是我此刻看到、听到、感觉到的现场；{me}后面才是我自己想的和做的。",
     ),
 }
-DEFAULT_NARRATION = "second"
+DEFAULT_NARRATION = "first"
 
 
 def narration(key: Any = None) -> Narration:
