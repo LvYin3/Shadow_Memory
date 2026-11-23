@@ -13,7 +13,7 @@ from ..core import clock as clock_mod
 from ..core.audit import Audit
 from ..core.config import ConfigView
 from ..core.locks import LockPool
-from . import bucket
+from . import bucket, link
 from .card import CHAT_BOUNDARY_LINE, MINUTE_MS, load_card, render_for_chat
 from .director import BaseCardResolver, Director, SceneFailed, SceneProgress, SceneResult
 from .llm import ROLE_ACTOR, ROLE_GM, ROLE_LABELS, StoryLLM
@@ -37,6 +37,7 @@ class StoryService:
         llm: StoryLLM,
         audit: Audit,
         base_card: BaseCardResolver,
+        platform_issue: Callable[[str], str] | None = None,
         now_fn: Callable[[], int] = clock_mod.now_ms,
     ) -> None:
         self.configs = configs
@@ -45,6 +46,8 @@ class StoryService:
         self.llm = llm
         self.audit = audit
         self._base_card = base_card
+        self._platform_issue = platform_issue
+        self._waiting_platform: set[str] = set()
         self.now_fn = now_fn
         self._locks = LockPool()
 
@@ -116,6 +119,15 @@ class StoryService:
                     ),
                 )
             fields.update(tokens=start, tokens_at=now)
+        if not int(state.get("share_tokens_at") or 0):
+            view = self.configs(bot_id)
+            fields.update(
+                share_tokens=bucket.initial(
+                    per_day=view.float("story.share_per_day", 20, lo=0, hi=1000),
+                    capacity=view.float("story.share_capacity", 20, lo=0, hi=1000),
+                ),
+                share_tokens_at=now,
+            )
         if not state.get("next_wake_at") or int(state["next_wake_at"]) < now:
             fields["next_wake_at"] = now
         await self.store.update_state(bot_id, now, **fields)
@@ -146,6 +158,16 @@ class StoryService:
         self.audit.event("story_resumed", bot_id=bot_id)
         return await self.status(bot_id)
 
+    def platform_warning(self, bot_id: str) -> str:
+        """平台未加载或反向 WS 未连接时返回提示文本；就绪或无需判断时返回空串。"""
+        if self._platform_issue is None:
+            return ""
+        try:
+            return str(self._platform_issue(bot_id) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("检查平台连接状态失败 %s：%s", bot_id, exc)
+            return ""
+
     # ------------------------------------------------------------------ 唤醒
     async def check_wake(self, bot_id: str) -> None:
         """手动唤醒前的检查；不满足时抛 ``StoryError``。"""
@@ -155,6 +177,9 @@ class StoryService:
         issues = await self.problems(bot_id)
         if issues:
             raise StoryError("；".join(issues))
+        warning = self.platform_warning(bot_id)
+        if warning:
+            raise StoryError(warning)
         if self.is_running(bot_id):
             raise StoryError("这个机器人正在演一场，等它结束再试")
 
@@ -197,6 +222,13 @@ class StoryService:
                 or int(state["next_wake_at"]) > now
             ):
                 return False
+            warning = self.platform_warning(bot_id)
+            if warning:
+                if bot_id not in self._waiting_platform:
+                    self._waiting_platform.add(bot_id)
+                    self.audit.event("story_wait_platform", bot_id=bot_id, reason=warning)
+                return False
+            self._waiting_platform.discard(bot_id)
             cfg = self.configs(bot_id)
             per_day, capacity = self._bucket_params(bot_id)
             tokens = bucket.refill(
@@ -210,7 +242,8 @@ class StoryService:
                 # 额度耗尽不报错：故事静默，状态卡托底，等攒够一次再来（届时走补叙）。
                 wait = bucket.ms_until(tokens, 1.0, per_day=per_day)
                 if wait is None:
-                    wait = cfg.int("story.max_wake_minutes", 720, lo=1, hi=10080) * MINUTE_MS
+                    fallback = cfg.int("story.max_wake_minutes", 0, lo=0, hi=10080) or 60
+                    wait = fallback * MINUTE_MS
                 await self.store.update_state(
                     bot_id,
                     now,
@@ -356,10 +389,98 @@ class StoryService:
                 for row in scenes
             ],
             "problems": await self.problems(bot_id),
+            "platform_warning": self.platform_warning(bot_id),
+            "npcs": [
+                {
+                    "name": row["name"],
+                    "status": row["status"],
+                    "last_seen_at": row.get("last_seen_at"),
+                }
+                for row in await self.store.npcs(bot_id)
+                if row.get("status") == "active"
+            ],
         }
 
     async def export(self, bot_id: str) -> dict[str, Any]:
         return await self.store.export(bot_id)
+
+    async def propose(
+        self, bot_id: str, umo: str, display_name: str, text: str, *, wake_now: bool
+    ) -> str:
+        """聊天里的 act：记下意图。要求现在就去时，只把预约提前，不另扣一枚令牌。"""
+        body = " ".join(str(text or "").split())
+        if not body:
+            return "我没听清要去做什么。"
+        now = self.now_fn()
+        state = await self.store.state(bot_id)
+        if state is None or not int(state.get("enabled") or 0):
+            return "这件事我先记在聊天里，故事那边还没开。"
+        await self.store.add_intent(bot_id, umo, display_name or "对方", body[:300], now)
+        if not wake_now:
+            return "我记下了，回头去做。"
+        if self.is_running(bot_id):
+            return "我这会儿正忙着，先记着，忙完再去。"
+        per_day, capacity = self._bucket_params(bot_id)
+        tokens = bucket.refill(
+            float(state.get("tokens") or 0.0),
+            int(state.get("tokens_at") or 0),
+            now,
+            per_day=per_day,
+            capacity=capacity,
+        )
+        if tokens < 1:
+            return "我现在走不开，先记着。"
+        current = state.get("next_wake_at")
+        if current is None or int(current) > now:
+            await self.store.update_state(bot_id, now, next_wake_at=now)
+        return "我现在就去。"
+
+    async def note_unread(self, bot_id: str, umo: str, display_name: str, text: str) -> None:
+        state = await self.store.state(bot_id)
+        if state is None or not int(state.get("enabled") or 0):
+            return
+        keep = self.configs(bot_id).int("story.unread_keep", 1, lo=0, hi=20)
+        await self.store.add_unread(
+            bot_id, umo, display_name or "对方", text, keep, self.now_fn()
+        )
+
+    async def note_seen_message(
+        self, bot_id: str, umo: str, display_name: str, text: str
+    ) -> None:
+        """她会看到的消息才判定。失败或打平都不记账。"""
+        state = await self.store.state(bot_id)
+        if state is None or not int(state.get("enabled") or 0) or not text.strip():
+            return
+        jev = getattr(getattr(self.director, "memory", None), "jev", None)
+        if not getattr(jev, "available", False):
+            return
+        cfg = self.configs(bot_id)
+        try:
+            answers = await jev.ask(
+                {"speaker": display_name, "text": text[:500]},
+                link.remote_questions(),
+            )
+        except Exception as exc:  # noqa: BLE001 - 判定失败就当没这回事
+            self.audit.warn("远方动作判定失败：%s", exc)
+            return
+        if not answers:
+            return
+        kind = link.pick_remote(
+            answers, cfg.float("story.remote_threshold", 0.6, lo=0.0, hi=1.0)
+        )
+        if not kind:
+            return
+        await self.store.add_remote(
+            bot_id, umo, display_name or "对方", kind, text[:300], self.now_fn()
+        )
+        self.audit.event("story_remote", bot_id=bot_id, remote_kind=kind, speaker=display_name)
+
+    async def situation_line(self, bot_id: str) -> str:
+        lines = await self.chat_lines(bot_id)
+        for line in lines:
+            if line.startswith("- 我现在") or line.startswith("- 我之前"):
+                return line
+        return ""
 
 
 __all__ = ["StoryError", "StoryService", "WorldSeedError"]

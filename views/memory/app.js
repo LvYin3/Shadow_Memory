@@ -6,6 +6,22 @@ const state = {
   rebuild: null,
   tts: [],
   defaults: {},
+  config: null,
+  overrideEdits: {},
+  configBot: "",
+  configView: { level: "cards", groupId: "", sectionKey: "" },
+  secretEdits: {},
+  spoilerConfirmed: false,
+};
+
+const CONFIG_BLURBS = {
+  model: "判断、写作和看图用的模型。",
+  memory: "她记得什么、怎么想起来。",
+  interaction: "什么时候开口、图片和备忘。",
+  story: "聊天之外的那一段生活。",
+  logging: "日志留多久。",
+  bots: "只对某一个机器人生效的覆盖。",
+  other: "还没归进上面几块的项。",
 };
 
 const CATEGORY_LABELS = {
@@ -466,6 +482,9 @@ function renderStory(data) {
       const problems = (row.problems || []).length
         ? `<p class="warn">还缺：${(row.problems || []).map(esc).join("；")}</p>`
         : "";
+      const platformWarn = row.platform_warning
+        ? `<p class="warn">暂缓唤醒：${esc(row.platform_warning)}</p>`
+        : "";
       return `
       <div class="story-card" data-bot="${esc(row.bot_id)}">
         <div class="story-head">
@@ -485,13 +504,180 @@ function renderStory(data) {
           <div><b>下次唤醒</b>${active ? clock(row.next_wake_at) : "—"}</div>
           <div><b>状态卡</b>${card ? esc(card) : '<span class="muted">没有或已过期</span>'}</div>
           <div><b>累计</b>${row.scenes_total} 场 · 设定 ${canon.seed ?? 0}+${canon.play ?? 0} · 笔记 ${row.notes}</div>
+          <div><b>活跃配角</b>${activeNpcs(row)}</div>
         </div>
         ${problems}
+        ${platformWarn}
         <h3>最近的场景（她记下的）</h3>
         ${scenes ? `<ul>${scenes}</ul>` : '<p class="muted">（还没有）</p>'}
+        <p><button class="ghost" data-story-spoiler>剧透与种子</button></p>
+        <div class="story-spoiler"></div>
       </div>`;
     })
     .join("");
+}
+
+function activeNpcs(row) {
+  const names = (row.npcs || []).map((npc) => {
+    const when = npc.last_seen_at ? clock(npc.last_seen_at) : "还没出场";
+    return `${esc(npc.name)}（${when}）`;
+  });
+  return names.length ? names.join("、") : '<span class="muted">没有</span>';
+}
+
+function spoilerHtml(data) {
+  const scenes = (data.scenes || [])
+    .map((scene) => {
+      const lines = (scene.transcript || [])
+        .map((turn) => {
+          const who = turn.role === "npc" ? esc(turn.name || "配角") : turn.role === "me" ? "她" : "叙述";
+          const extra = turn.role === "me" && turn.inner ? `（心里：${esc(turn.inner)}）` : "";
+          return `<li>${who}：${extra}${esc(turn.text || "")}</li>`;
+        })
+        .join("");
+      return `<section><h4>${clock(scene.started_at)} · ${esc(scene.status || "")}</h4><ul>${lines || "<li class='muted'>（空）</li>"}</ul></section>`;
+    })
+    .join("");
+  const tree = data.tree || { threads: [], daily: { recent: [], older: [] } };
+  const threads = (tree.threads || [])
+    .map((thread) => {
+      const people = (thread.people || []).map(esc).join("、");
+      const linked = [...(thread.canon || []), ...(thread.seed || [])].map(esc).join("、");
+      const scenes = (thread.scenes || []).map((id) => `#${id}`).join(" ");
+      return `<li>${esc(thread.title || "")}${people ? ` · ${people}` : ""}${linked ? ` · ${linked}` : ""}${scenes ? ` · ${scenes}` : ""}</li>`;
+    })
+    .join("");
+  const daily = tree.daily || {};
+  const recent = (daily.recent || []).map((item) => `<li>#${item.id} ${esc(item.line || "")}</li>`).join("");
+  const older = (daily.older || []).map((id) => `#${id}`).join(" ");
+  const canon = (data.canon || [])
+    .map((item) => `<li>${esc(item.origin)} · ${esc(item.name)}：${esc(item.body)}</li>`)
+    .join("");
+  const seed = data.seed || {};
+  const options = (data.categories || [])
+    .map((item) => `<option value="${esc(item.id)}">${esc(item.label)}</option>`)
+    .join("");
+  const entries = (seed.entries || [])
+    .map((entry) => entryRow(options, entry))
+    .join("");
+  const hooks = (seed.hooks || []).map((hook) => hookRow(hook)).join("");
+  const opening = seed.opening || {};
+  let heavy = "";
+  if (data.spoiler_heavy) {
+    const notes = (data.notes || [])
+      .map(
+        (note) => `<div class="note-row" data-note-id="${note.id}">
+          <input class="note-title" value="${esc(note.title)}" />
+          <textarea class="note-body">${esc(note.body)}</textarea>
+          <button class="ghost" data-note-save>保存</button>
+          <button class="ghost" data-note-delete>删除</button>
+        </div>`
+      )
+      .join("");
+    const npcs = (data.npcs || [])
+      .map((npc) => {
+        const persona = (npc.persona || []).map((item) => `<li>${esc(item.layer)}：${esc(item.text)}</li>`).join("");
+        const facts = (npc.facts || []).map((text) => `<li>${esc(text)}</li>`).join("");
+        return `<section><h4>${esc(npc.name)} · ${npc.status === "active" ? "活跃" : "休眠"}</h4>
+          <p>${esc(npc.relationship || "")}</p>
+          <ul>${persona}</ul><ul>${facts}</ul></section>`;
+      })
+      .join("");
+    heavy = `<h3>主持人笔记</h3>${notes || '<p class="muted">（没有）</p>'}
+      <div class="note-row">
+        <input class="note-title" placeholder="新笔记标题" />
+        <textarea class="note-body" placeholder="正文"></textarea>
+        <button class="ghost" data-note-save>添加</button>
+      </div>
+      <h3>配角记忆</h3>${npcs || '<p class="muted">（没有）</p>'}`;
+  }
+  return `
+    <h3>完整转录</h3>
+    ${scenes || '<p class="muted">（还没有）</p>'}
+    <h3>故事树（只读）</h3>
+    ${threads ? `<ul>${threads}</ul>` : '<p class="muted">（还没有未了结的线）</p>'}
+    <p>日常</p>
+    ${recent ? `<ul>${recent}</ul>` : ""}
+    ${older ? `<p class="muted">更早：${older}</p>` : ""}
+    <h3>设定集（只读）</h3>
+    ${canon ? `<ul>${canon}</ul>` : '<p class="muted">（没有）</p>'}
+    <h3>世界种子</h3>
+    <label>标题 <input class="seed-title" value="${esc(seed.title || "")}" /></label>
+    <label>大纲 <textarea class="seed-outline">${esc(seed.outline || "")}</textarea></label>
+    <div class="seed-entries">${entries}</div>
+    <button class="ghost" type="button" data-entry-add>加一条设定</button>
+    <div class="seed-hooks">${hooks}</div>
+    <button class="ghost" type="button" data-hook-add>加一个钩子</button>
+    <label>开场地点 <input class="seed-where" value="${esc(opening.where || "")}" /></label>
+    <label>开场在做 <input class="seed-doing" value="${esc(opening.doing || "")}" /></label>
+    <p><button data-seed-save>保存世界种子</button></p>
+    ${heavy}`;
+}
+
+function entryRow(options, entry) {
+  const selected = entry && entry.category ? entry.category : "other";
+  const opts = options.replace(
+    `value="${selected}"`,
+    `value="${selected}" selected`
+  );
+  return `<div class="entry-row">
+    <select class="entry-category">${opts}</select>
+    <input class="entry-name" value="${esc((entry && entry.name) || "")}" />
+    <textarea class="entry-body">${esc((entry && entry.body) || "")}</textarea>
+    <button class="ghost" type="button" data-row-remove>去掉</button>
+  </div>`;
+}
+
+function hookRow(text) {
+  return `<div class="hook-row"><input class="hook-text" value="${esc(text || "")}" />
+    <button class="ghost" type="button" data-row-remove>去掉</button></div>`;
+}
+
+async function openSpoiler(card, bot) {
+  const box = card.querySelector(".story-spoiler");
+  if (!box) return;
+  if (!state.spoilerConfirmed) {
+    box.innerHTML = `<p>展开后会看到她还没经历的转录、设定和世界种子。这次确认只在本页有效，刷新后要再确认。</p>
+      <button type="button" data-spoiler-confirm>我知道，展开</button>`;
+    return;
+  }
+  try {
+    box.dataset.categories = JSON.stringify((await loadSpoiler(card, bot)).categories || []);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function loadSpoiler(card, bot) {
+  const data = await apiGet("story/spoiler", { bot });
+  card.querySelector(".story-spoiler").innerHTML = spoilerHtml(data);
+  card.dataset.categories = JSON.stringify(data.categories || []);
+  return data;
+}
+
+function collectSeed(card) {
+  const box = card.querySelector(".story-spoiler");
+  const entries = [...box.querySelectorAll(".entry-row")]
+    .map((row) => ({
+      category: row.querySelector(".entry-category").value,
+      name: row.querySelector(".entry-name").value.trim(),
+      body: row.querySelector(".entry-body").value.trim(),
+    }))
+    .filter((item) => item.name || item.body);
+  const hooks = [...box.querySelectorAll(".hook-text")]
+    .map((node) => node.value.trim())
+    .filter(Boolean);
+  return {
+    version: "world_seed/v1",
+    title: box.querySelector(".seed-title").value.trim(),
+    outline: box.querySelector(".seed-outline").value.trim(),
+    entries,
+    hooks,
+    opening: {
+      where: box.querySelector(".seed-where").value.trim(),
+      doing: box.querySelector(".seed-doing").value.trim(),
+    },
+  };
 }
 
 async function loadStory() {
@@ -509,6 +695,46 @@ const STORY_ACTION_DONE = {
   resume: "故事继续",
   wake: "开始演了，通常要一两分钟，稍后点刷新看结果",
 };
+
+async function saveStorySeed(card, bot) {
+  try {
+    await apiPost("story/seed", { bot, ...collectSeed(card) });
+    toast("世界种子已换上，下一场才会用");
+    await loadSpoiler(card, bot);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function saveStoryNote(card, bot, row) {
+  if (!row) return;
+  try {
+    await apiPost("story/note", {
+      bot,
+      id: Number(row.dataset.noteId || 0),
+      title: row.querySelector(".note-title").value,
+      body: row.querySelector(".note-body").value,
+    });
+    toast("笔记已保存");
+    await loadSpoiler(card, bot);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function deleteStoryNote(card, bot, row) {
+  if (!row || !row.dataset.noteId) {
+    row?.remove();
+    return;
+  }
+  try {
+    await apiPost("story/note/delete", { bot, id: Number(row.dataset.noteId) });
+    toast("笔记已删除");
+    await loadSpoiler(card, bot);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
 
 async function storyAction(bot, action) {
   try {
@@ -533,6 +759,502 @@ async function loadOverview() {
   }
 }
 
+function providerChoices(list, selected, emptyLabel) {
+  const items = list || [];
+  const known = new Set(items.map((item) => item.id));
+  let html = `<option value="">${esc(emptyLabel)}</option>`;
+  if (selected && !known.has(selected)) {
+    html += `<option value="${esc(selected)}" selected>${esc(selected)}（当前值）</option>`;
+  }
+  html += items
+    .map(
+      (item) =>
+        `<option value="${esc(item.id)}" ${item.id === selected ? "selected" : ""}>${esc(item.label || item.id)}</option>`,
+    )
+    .join("");
+  return html;
+}
+
+function fieldControl(field, value) {
+  const path = esc(field.path);
+  const slider = field.slider || {};
+  const min = slider.min != null ? ` min="${esc(slider.min)}"` : "";
+  const max = slider.max != null ? ` max="${esc(slider.max)}"` : "";
+  const step = slider.step != null ? ` step="${esc(slider.step)}"` : field.number_type === "float" ? ` step="any"` : "";
+  if (field.widget === "bool") {
+    return `<label class="check"><input type="checkbox" data-config-path="${path}" data-widget="bool" ${value ? "checked" : ""} /><span>${esc(field.label)}</span></label>`;
+  }
+  if (field.widget === "textarea") {
+    return `<label class="wide">${esc(field.label)}<textarea data-config-path="${path}" data-widget="textarea" rows="4">${esc(value)}</textarea></label>`;
+  }
+  if (field.widget === "select" || field.widget === "ugc") {
+    const current = value == null ? "" : String(value);
+    const options = (field.options || [])
+      .map(
+        (item) =>
+          `<option value="${esc(item.value)}" ${String(item.value) === current ? "selected" : ""}>${esc(item.label)}</option>`,
+      )
+      .join("");
+    return `<label>${esc(field.label)}<select data-config-path="${path}" data-widget="${esc(field.widget)}">${options}</select></label>`;
+  }
+  if (field.widget === "provider") {
+    return `<label>${esc(field.label)}<select data-config-path="${path}" data-widget="provider">${providerChoices(state.config.providers, value || "", "留空用默认")}</select></label>`;
+  }
+  if (field.widget === "secret") {
+    const set = state.config.values.secrets?.[field.path]?.set;
+    const pending = state.secretEdits[field.path] || {};
+    const clear = pending.clear ? " checked" : "";
+    return `<div class="wide"><label>${esc(field.label)}<input type="password" data-secret="${path}" autocomplete="new-password" placeholder="${set ? "已填写，留空不改" : "未填写"}" value="${esc(pending.value || "")}" /></label><label class="check"><input type="checkbox" data-secret-clear="${path}"${clear} />清除</label></div>`;
+  }
+  if (field.widget === "number") {
+    return `<label>${esc(field.label)}<input type="number" data-config-path="${path}" data-widget="number"${min}${max}${step} value="${esc(value)}" /></label>`;
+  }
+  if (field.widget === "thinking") {
+    const modes = state.config.values.thinking_by_task || {};
+    const rows = (field.options ? ["fragment", "tension", "facts", "distill", "consolidate"] : [])
+      .map((task) => {
+        const current = modes[task] || "";
+        const options = (field.options || [])
+          .map(
+            (item) =>
+              `<option value="${esc(item.value)}" ${item.value === current ? "selected" : ""}>${esc(item.label)}</option>`,
+          )
+          .join("");
+        return `<label>${esc(task)}<select data-thinking="${esc(task)}">${options}</select></label>`;
+      })
+      .join("");
+    return `<div class="wide"><div>${esc(field.label)}</div><div class="config-fields">${rows}</div></div>`;
+  }
+  if (field.widget === "tts") {
+    const rows = Object.entries(state.config.values.tts_provider_ids || {});
+    const body = (rows.length ? rows : [["", ""]])
+      .map(
+        ([bot, provider]) => `
+        <div class="tts-row">
+          <input data-tts-bot placeholder="bot_id" value="${esc(bot)}" />
+          <select data-tts-provider>${providerChoices(state.config.tts_providers, provider, "选择提供商")}</select>
+          <button type="button" class="ghost" data-tts-remove>删除</button>
+        </div>`,
+      )
+      .join("");
+    return `<div class="wide" data-tts><div>${esc(field.label)}</div>${body}<button type="button" class="ghost" data-tts-add>加一行</button></div>`;
+  }
+  if (field.widget === "dict_rows") {
+    const rows = Object.entries(value || {});
+    const body = (rows.length ? rows : [["", ""]])
+      .map(
+        ([key, item]) => `
+        <div class="tts-row">
+          <input data-dict-key="${path}" value="${esc(key)}" />
+          <input data-dict-value="${path}" value="${esc(item)}" />
+          <button type="button" class="ghost" data-dict-remove>删除</button>
+        </div>`,
+      )
+      .join("");
+    return `<div class="wide" data-dict="${path}"><div>${esc(field.label)}</div>${body}<button type="button" class="ghost" data-dict-add="${path}">加一行</button></div>`;
+  }
+  return `<label>${esc(field.label)}<input type="text" data-config-path="${path}" data-widget="text" value="${esc(value)}" /></label>`;
+}
+
+function fieldBlock(field, values) {
+  const value = values[field.path];
+  const hint = field.hint ? `<p class="hint">${esc(field.hint)}</p>` : "";
+  const note = field.note ? `<p class="note">${esc(field.note)}</p>` : "";
+  return `<div>${fieldControl(field, value)}${hint}${note}</div>`;
+}
+
+function renderFields(fields, values) {
+  if (!fields.length) return "";
+  return `<div class="config-fields">${fields.map((field) => fieldBlock(field, values)).join("")}</div>`;
+}
+
+function configBotChoices() {
+  const ids = new Set(state.config.bots || []);
+  (state.bots || []).forEach((row) => ids.add(row.bot_id));
+  Object.keys(state.overrideEdits).forEach((id) => ids.add(id));
+  return [...ids].filter(Boolean).sort();
+}
+
+function overrideControl(field, value) {
+  const key = esc(field.key);
+  if (field.widget === "tri") {
+    const current = value === true ? "true" : value === false ? "false" : "";
+    const options = (field.options || [])
+      .map(
+        (item) =>
+          `<option value="${esc(item.value)}" ${item.value === current ? "selected" : ""}>${esc(item.label)}</option>`,
+      )
+      .join("");
+    return `<label>${esc(field.label)}<select data-override="${key}" data-widget="tri">${options}</select></label>`;
+  }
+  if (field.widget === "select" || field.widget === "ugc") {
+    const current = value == null ? "" : String(value);
+    const options = (field.options || [])
+      .map(
+        (item) =>
+          `<option value="${esc(item.value)}" ${String(item.value) === current ? "selected" : ""}>${esc(item.label)}</option>`,
+      )
+      .join("");
+    return `<label>${esc(field.label)}<select data-override="${key}" data-widget="${esc(field.widget)}">${options}</select></label>`;
+  }
+  if (field.widget === "provider") {
+    return `<label>${esc(field.label)}<select data-override="${key}" data-widget="provider">${providerChoices(state.config.tts_providers, value || "", "跟随全局")}</select></label>`;
+  }
+  if (field.widget === "textarea") {
+    return `<label>${esc(field.label)}<textarea data-override="${key}" data-widget="textarea" rows="3">${esc(value || "")}</textarea></label>`;
+  }
+  if (field.widget === "number") {
+    const slider = field.slider || {};
+    const min = slider.min != null ? ` min="${esc(slider.min)}"` : "";
+    const max = slider.max != null ? ` max="${esc(slider.max)}"` : "";
+    const step = slider.step != null ? ` step="${esc(slider.step)}"` : field.number_type === "float" ? ` step="any"` : "";
+    return `<label>${esc(field.label)}<input data-override="${key}" data-widget="number" type="number"${min}${max}${step} value="${value == null ? "" : esc(value)}" placeholder="留空跟随全局" /></label>`;
+  }
+  return `<label>${esc(field.label)}<input data-override="${key}" data-widget="text" type="text" value="${esc(value || "")}" placeholder="留空跟随全局" /></label>`;
+}
+
+function renderBotFields() {
+  const group = (state.config.groups || []).find((item) => item.kind === "overrides");
+  const box = $("config-bot-fields");
+  if (!group || !box) return;
+  const values = state.overrideEdits[state.configBot] || {};
+  if (!state.configBot) {
+    box.innerHTML = `<p class="muted">选择或填写一个机器人。</p>`;
+    return;
+  }
+  box.innerHTML = (group.fields || [])
+    .map((field) => {
+      const hint = field.hint ? `<p class="hint">${esc(field.hint)}</p>` : "";
+      return `<div>${overrideControl(field, values[field.key])}${hint}</div>`;
+    })
+    .join("");
+}
+
+function renderBotPicker() {
+  const select = $("config-bot-select");
+  if (!select) return;
+  const ids = configBotChoices();
+  select.innerHTML = [`<option value="">选择机器人</option>`]
+    .concat(
+      ids.map(
+        (id) => `<option value="${esc(id)}" ${id === state.configBot ? "selected" : ""}>${esc(id)}</option>`,
+      ),
+    )
+    .join("");
+}
+
+function configGroups() {
+  return state.config?.groups || [];
+}
+
+function configGroup(id) {
+  return configGroups().find((item) => item.id === id) || null;
+}
+
+function configBackButton() {
+  return `<button type="button" class="ghost config-back" data-config-back>返回</button>`;
+}
+
+function renderSectionBlocks(section, values) {
+  return (section.blocks || [])
+    .map((block) => {
+      const title = block.title ? `<h4>${esc(block.title)}</h4>` : "";
+      const advanced = block.advanced?.length
+        ? `<details class="advanced"><summary>进阶</summary>${renderFields(block.advanced, values)}</details>`
+        : "";
+      return `${title}${renderFields(block.common || [], values)}${advanced}`;
+    })
+    .join("");
+}
+
+function renderConfigCards() {
+  const cards = configGroups()
+    .map(
+      (group) => `
+      <button type="button" class="config-card" data-config-group="${esc(group.id)}">
+        <span class="config-card-title">${esc(group.title)}</span>
+        <span class="muted">${esc(CONFIG_BLURBS[group.id] || "")}</span>
+      </button>`,
+    )
+    .join("");
+  return `<div class="config-cards">${cards}</div>`;
+}
+
+function renderConfigSections(groupId) {
+  const group = configGroup(groupId);
+  if (!group || group.kind === "overrides") return renderConfigCards();
+  const rows = (group.sections || [])
+    .map(
+      (section) => `
+      <button type="button" class="config-card" data-config-section="${esc(section.key)}">
+        <span class="config-card-title">${esc(section.title)}</span>
+      </button>`,
+    )
+    .join("");
+  return `${configBackButton()}<h2>${esc(group.title)}</h2><div class="config-cards">${rows}</div>`;
+}
+
+function renderConfigFields(view) {
+  const group = configGroup(view.groupId);
+  if (!group) return renderConfigCards();
+  if (group.kind === "overrides") {
+    return `${configBackButton()}
+      <section class="config-block">
+        <h2>${esc(group.title)}</h2>
+        <p class="muted">留空就是删掉这项覆盖，跟随全局。不认识的键会原样留着，这里不显示。</p>
+        <div class="bot-pick">
+          <select id="config-bot-select"></select>
+          <input id="config-bot-new" type="text" placeholder="或填写新的 bot_id" />
+          <button type="button" class="ghost" id="config-bot-use">编辑</button>
+        </div>
+        <div id="config-bot-fields" class="config-fields"></div>
+      </section>`;
+  }
+  const sections = group.sections || [];
+  const section = sections.find((item) => item.key === view.sectionKey) || sections[0];
+  if (!section) {
+    return `${configBackButton()}<p class="muted">这一节没有可改的项。</p>`;
+  }
+  const values = state.config.values?.fields || {};
+  return `${configBackButton()}
+    <section class="config-block">
+      <p class="muted">${esc(group.title)}</p>
+      <h2>${esc(section.title)}</h2>
+      ${renderSectionBlocks(section, values)}
+    </section>`;
+}
+
+function renderConfig() {
+  const root = $("config-root");
+  if (!root || !state.config) return;
+  const view = state.configView || { level: "cards", groupId: "", sectionKey: "" };
+  if (view.level === "sections") root.innerHTML = renderConfigSections(view.groupId);
+  else if (view.level === "fields") root.innerHTML = renderConfigFields(view);
+  else root.innerHTML = renderConfigCards();
+  renderBotPicker();
+  renderBotFields();
+}
+
+function openConfigGroup(id) {
+  flushDraft();
+  const group = configGroup(id);
+  if (!group) return;
+  const sections = group.sections || [];
+  if (group.kind === "overrides" || sections.length <= 1) {
+    state.configView = {
+      level: "fields",
+      groupId: id,
+      sectionKey: group.kind === "overrides" ? "" : sections[0]?.key || "",
+    };
+  } else {
+    state.configView = { level: "sections", groupId: id, sectionKey: "" };
+  }
+  renderConfig();
+}
+
+function openConfigSection(key) {
+  flushDraft();
+  state.configView = { level: "fields", groupId: state.configView.groupId, sectionKey: key };
+  renderConfig();
+}
+
+function backConfig() {
+  flushDraft();
+  const view = state.configView;
+  const group = configGroup(view.groupId);
+  const many = group && group.kind !== "overrides" && (group.sections || []).length > 1;
+  if (view.level === "fields" && many) {
+    state.configView = { level: "sections", groupId: view.groupId, sectionKey: "" };
+  } else {
+    state.configView = { level: "cards", groupId: "", sectionKey: "" };
+  }
+  renderConfig();
+}
+
+function flushBotForm() {
+  const box = $("config-bot-fields");
+  if (!box || !state.configBot) return;
+  const data = {};
+  box.querySelectorAll("[data-override]").forEach((node) => {
+    if (node.dataset.widget === "tri") {
+      data[node.dataset.override] = node.value === "true" ? true : node.value === "false" ? false : "";
+      return;
+    }
+    data[node.dataset.override] = node.value;
+  });
+  state.overrideEdits[state.configBot] = data;
+}
+
+function useConfigBot(botId) {
+  const next = String(botId || "").trim();
+  if (!next) {
+    toast("先填写机器人", true);
+    return;
+  }
+  flushBotForm();
+  if (!state.overrideEdits[next]) state.overrideEdits[next] = {};
+  state.configBot = next;
+  renderBotPicker();
+  renderBotFields();
+}
+
+function onConfigChange(event) {
+  const target = event.target;
+  if (target && target.id === "config-bot-select") {
+    flushBotForm();
+    state.configBot = target.value || "";
+    renderBotFields();
+  }
+}
+
+function onConfigClick(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+  if (target.closest("[data-config-back]")) {
+    backConfig();
+    return;
+  }
+  const card = target.closest("[data-config-group]");
+  if (card) {
+    openConfigGroup(card.dataset.configGroup);
+    return;
+  }
+  const section = target.closest("[data-config-section]");
+  if (section) {
+    openConfigSection(section.dataset.configSection);
+    return;
+  }
+  if (target.id === "config-bot-use") {
+    useConfigBot($("config-bot-new").value);
+    return;
+  }
+  if (target.dataset.ttsAdd != null || target.hasAttribute("data-tts-add")) {
+    const host = target.closest("[data-tts]");
+    const row = document.createElement("div");
+    row.className = "tts-row";
+    row.innerHTML = `<input data-tts-bot placeholder="bot_id" /><select data-tts-provider>${providerChoices(state.config.tts_providers, "", "选择提供商")}</select><button type="button" class="ghost" data-tts-remove>删除</button>`;
+    host.insertBefore(row, target);
+    return;
+  }
+  if (target.hasAttribute("data-tts-remove")) {
+    target.closest(".tts-row")?.remove();
+    return;
+  }
+  if (target.dataset.dictAdd) {
+    const host = target.closest("[data-dict]");
+    const path = target.dataset.dictAdd;
+    const row = document.createElement("div");
+    row.className = "tts-row";
+    row.innerHTML = `<input data-dict-key="${esc(path)}" /><input data-dict-value="${esc(path)}" /><button type="button" class="ghost" data-dict-remove>删除</button>`;
+    host.insertBefore(row, target);
+    return;
+  }
+  if (target.hasAttribute("data-dict-remove")) {
+    target.closest(".tts-row")?.remove();
+  }
+}
+
+function flushDraft() {
+  if (!state.config?.values) return;
+  flushBotForm();
+  const root = $("config-root");
+  if (!root) return;
+  const values = state.config.values;
+  values.fields = values.fields || {};
+  root.querySelectorAll("[data-config-path]").forEach((node) => {
+    const path = node.dataset.configPath;
+    if (node.dataset.widget === "bool") values.fields[path] = node.checked;
+    else if (node.dataset.widget === "ugc" || node.dataset.widget === "number") values.fields[path] = node.value;
+    else values.fields[path] = node.value;
+  });
+  root.querySelectorAll("[data-secret]").forEach((node) => {
+    const path = node.dataset.secret;
+    const clear = root.querySelector(`[data-secret-clear="${CSS.escape(path)}"]`);
+    state.secretEdits[path] = { value: node.value, clear: Boolean(clear && clear.checked) };
+  });
+  const thinkingNodes = root.querySelectorAll("[data-thinking]");
+  if (thinkingNodes.length) {
+    values.thinking_by_task = { ...(values.thinking_by_task || {}) };
+    thinkingNodes.forEach((node) => {
+      values.thinking_by_task[node.dataset.thinking] = node.value;
+    });
+  }
+  const ttsHost = root.querySelector("[data-tts]");
+  if (ttsHost) {
+    const tts = {};
+    ttsHost.querySelectorAll(".tts-row").forEach((row) => {
+      const bot = row.querySelector("[data-tts-bot]");
+      const provider = row.querySelector("[data-tts-provider]");
+      if (!bot || !provider) return;
+      const botId = bot.value.trim();
+      const providerId = provider.value.trim();
+      if (botId && providerId) tts[botId] = providerId;
+    });
+    values.tts_provider_ids = tts;
+  }
+  root.querySelectorAll("[data-dict]").forEach((host) => {
+    const path = host.dataset.dict;
+    const rows = {};
+    host.querySelectorAll(".tts-row").forEach((row) => {
+      const key = row.querySelector("[data-dict-key]")?.value.trim();
+      const value = row.querySelector("[data-dict-value]")?.value ?? "";
+      if (key) rows[key] = value;
+    });
+    values.fields[path] = rows;
+  });
+}
+
+function collectConfig() {
+  flushDraft();
+  const values = state.config?.values || {};
+  const secrets = {};
+  const known = new Set([
+    ...Object.keys(values.secrets || {}),
+    ...Object.keys(state.secretEdits || {}),
+  ]);
+  known.forEach((path) => {
+    secrets[path] = state.secretEdits[path] || { value: "", clear: false };
+  });
+  return {
+    fields: { ...(values.fields || {}) },
+    secrets,
+    thinking_by_task: { ...(values.thinking_by_task || {}) },
+    tts_provider_ids: { ...(values.tts_provider_ids || {}) },
+    bot_overrides: state.overrideEdits,
+  };
+}
+
+async function loadConfig() {
+  try {
+    state.config = await apiGet("config");
+    state.overrideEdits = { ...(state.config.values?.bot_overrides || {}) };
+    state.secretEdits = {};
+    state.configView = { level: "cards", groupId: "", sectionKey: "" };
+    const choices = configBotChoices();
+    state.configBot = choices.includes(state.configBot) ? state.configBot : choices[0] || "";
+    renderConfig();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function saveConfig() {
+  const button = $("config-save");
+  button.disabled = true;
+  try {
+    const result = await apiPost("config", collectConfig());
+    if (result?.values && state.config) state.config.values = result.values;
+    state.secretEdits = {};
+    state.overrideEdits = { ...(result?.values?.bot_overrides || state.overrideEdits) };
+    renderConfig();
+    toast("已保存，下一轮就生效");
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
 function switchTab(name) {
   document.querySelectorAll(".tab").forEach((node) => {
     node.classList.toggle("active", node.dataset.tab === name);
@@ -540,8 +1262,10 @@ function switchTab(name) {
   $("panel-overview").classList.toggle("hidden", name !== "overview");
   $("panel-settings").classList.toggle("hidden", name !== "settings");
   $("panel-story").classList.toggle("hidden", name !== "story");
+  $("panel-config").classList.toggle("hidden", name !== "config");
   if (name === "settings") loadSettings();
   if (name === "story") loadStory();
+  if (name === "config") loadConfig();
 }
 
 document.addEventListener("click", (event) => {
@@ -567,6 +1291,44 @@ document.addEventListener("click", (event) => {
       if (window.confirm("导出的文件包含完整转录、设定集和主持人笔记，会剧透。继续吗？")) {
         void exportBot(bot, "story");
       }
+      return;
+    }
+    if (target.closest("[data-story-spoiler]")) {
+      void openSpoiler(storyCard, bot);
+      return;
+    }
+    if (target.closest("[data-spoiler-confirm]")) {
+      state.spoilerConfirmed = true;
+      void openSpoiler(storyCard, bot);
+      return;
+    }
+    if (target.closest("[data-row-remove]")) {
+      const row = target.closest(".entry-row, .hook-row");
+      if (row) row.remove();
+      return;
+    }
+    if (target.closest("[data-entry-add]")) {
+      const categories = JSON.parse(storyCard.dataset.categories || "[]");
+      const options = categories
+        .map((item) => `<option value="${esc(item.id)}">${esc(item.label)}</option>`)
+        .join("");
+      storyCard.querySelector(".seed-entries").insertAdjacentHTML("beforeend", entryRow(options, null));
+      return;
+    }
+    if (target.closest("[data-hook-add]")) {
+      storyCard.querySelector(".seed-hooks").insertAdjacentHTML("beforeend", hookRow(""));
+      return;
+    }
+    if (target.closest("[data-seed-save]")) {
+      void saveStorySeed(storyCard, bot);
+      return;
+    }
+    if (target.closest("[data-note-save]")) {
+      void saveStoryNote(storyCard, bot, target.closest(".note-row"));
+      return;
+    }
+    if (target.closest("[data-note-delete]")) {
+      void deleteStoryNote(storyCard, bot, target.closest(".note-row"));
       return;
     }
   }
@@ -595,6 +1357,9 @@ async function boot() {
   document.querySelectorAll(".tab").forEach((node) => {
     node.addEventListener("click", () => switchTab(node.dataset.tab));
   });
+  $("config-save").addEventListener("click", () => saveConfig());
+  $("config-root").addEventListener("click", onConfigClick);
+  $("config-root").addEventListener("change", onConfigChange);
   $("preview-btn").addEventListener("click", previewTransfer);
   $("transfer-run").addEventListener("click", runTransfer);
   $("transfer-cancel").addEventListener("click", () => $("transfer-dialog").close());

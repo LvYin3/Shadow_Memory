@@ -337,6 +337,7 @@ CREATE TABLE IF NOT EXISTS story_state (
   world_title TEXT,
   outline TEXT,
   seed_meta TEXT,
+  tree TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -383,6 +384,62 @@ CREATE TABLE IF NOT EXISTS story_notes (
   updated_at INTEGER NOT NULL,
   UNIQUE (bot_id, title)
 );
+
+CREATE TABLE IF NOT EXISTS story_intents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  umo TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  scene_id INTEGER,
+  created_at INTEGER NOT NULL,
+  settled_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS story_remotes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  umo TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  claim TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  scene_id INTEGER,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS story_unreads (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  umo TEXT NOT NULL,
+  display_name TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS story_sends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  umo TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  text TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS story_npcs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_bot_id TEXT NOT NULL,
+  npc_bot_id TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  relationship TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  last_seen_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (owner_bot_id, name)
+);
 """
 
 DDL_INDEXES = """
@@ -418,6 +475,11 @@ CREATE INDEX IF NOT EXISTS idx_events_source ON events(bot_id, source, ended_at)
 CREATE INDEX IF NOT EXISTS idx_story_scenes_bot ON story_scenes(bot_id, id);
 CREATE INDEX IF NOT EXISTS idx_story_canon_bot ON story_canon(bot_id, origin);
 CREATE INDEX IF NOT EXISTS idx_story_notes_bot ON story_notes(bot_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_story_intents_bot ON story_intents(bot_id, status, id);
+CREATE INDEX IF NOT EXISTS idx_story_remotes_bot ON story_remotes(bot_id, status, id);
+CREATE INDEX IF NOT EXISTS idx_story_unreads_bot ON story_unreads(bot_id, id);
+CREATE INDEX IF NOT EXISTS idx_story_sends_bot ON story_sends(bot_id, umo, id);
+CREATE INDEX IF NOT EXISTS idx_story_npcs_owner ON story_npcs(owner_bot_id, status, name);
 """
 
 
@@ -610,6 +672,11 @@ class Database:
                 "key_fact": "INTEGER NOT NULL DEFAULT 0",
             },
             "distill_logs": {"gist_count": "INTEGER", "insight_count": "INTEGER"},
+            "story_state": {
+                "share_tokens": "REAL NOT NULL DEFAULT 0",
+                "share_tokens_at": "INTEGER NOT NULL DEFAULT 0",
+                "tree": "TEXT",
+            },
         }
 
         def _do() -> None:

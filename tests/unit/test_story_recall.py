@@ -88,19 +88,10 @@ async def test_older_scenes_judged_useful_are_brought_back(db, make_configs):
     await env.director.run(BOT)
 
     opening = env.llm.prompts("gm")[0]
-    block = opening.split("# 更早的、和此刻可能有关的场景\n")[1].split("\n\n")[0]
-    # 过阈值的按时间顺序带上，带编号方便点名去查；没过阈值的不带
-    assert block.splitlines()[0].startswith(f"- #{ids[1]} ") and OLD[1] in block
-    assert block.splitlines()[1].startswith(f"- #{ids[2]} ") and OLD[2] in block
-    assert OLD[0] not in opening
-    # 最近三场照旧在“最近几场的梗概”里，不当候选
-    assert f"#{ids[5]} " in opening.split("# 最近几场的梗概")[1]
-    (state, questions), = jev.past_calls
-    assert len(questions) == 3
-    assert all(OLD[i] not in str(questions) for i in (3, 4, 5))
-    # 判断模型只看外显信息：没有她的人格，也没有她的内心
-    assert set(state) == {"now", "her_status", "recent_scenes", "last_ending"}
-    assert "心里话" not in str(state)
+    assert "# 更早的、和此刻可能有关的场景" not in opening
+    assert "# 最近几场的梗概" not in opening
+    assert jev.past_calls == []
+    assert ids  # 场还在，只是不再预先塞进提示
 
 
 async def test_past_pick_respects_the_limit_and_counts_one_call(db, make_configs):
@@ -110,10 +101,8 @@ async def test_past_pick_respects_the_limit_and_counts_one_call(db, make_configs
     await add_scenes(env)
     script_scene(env)
     await env.director.run(BOT)
-    block = env.llm.prompts("gm")[0].split("# 更早的、和此刻可能有关的场景\n")[1].split("\n\n")[0]
-    assert block.count("- #") == 2
-    # 候选不止一条，也只问一次
-    assert len(jev.past_calls) == 1 and len(jev.past_calls[0][1]) == 5
+    assert "# 更早的、和此刻可能有关的场景" not in env.llm.prompts("gm")[0]
+    assert jev.past_calls == []
 
 
 async def test_falls_back_to_literal_matches_when_the_judge_fails(db, make_configs):
@@ -131,8 +120,8 @@ async def test_falls_back_to_literal_matches_when_the_judge_fails(db, make_confi
     script_scene(env)
     await env.director.run(BOT)
     opening = env.llm.prompts("gm")[0]
-    assert "# 更早的、和此刻可能有关的场景" in opening
-    assert OLD[2] in opening.split("# 更早的")[1].split("# 最近几场")[0]
+    assert "# 更早的、和此刻可能有关的场景" not in opening
+    assert jev.past_calls == []
 
 
 async def test_past_scenes_zero_turns_it_off(db, make_configs):
@@ -170,9 +159,9 @@ async def test_lookup_reads_scenes_notes_and_old_summaries(db, make_configs):
     found = env.llm.prompts("gm")[1].split("# 你查到的\n")[1]
     # #编号：那一场的完整经过，只有她外显的言行，没有内心
     assert f"#{ids[0]} " in found and "我做了第0件事" in found and "心里话0" not in found
-    assert "- [笔记] 诗集的来历：摊主是她外婆的旧识" in found
+    assert "摊主是她外婆的旧识" not in found
     assert f"- [以前的场景] #{ids[3]} " in found and OLD[3] in found
-    assert "（没有查到：火星）" in found
+    assert "没有查到" in found and "火星" in found
     assert "（没有 #9999 这一场）" in found
 
 

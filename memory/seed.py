@@ -317,6 +317,8 @@ def validate_full(data: Any) -> dict[str, Any]:
     return {
         "version": version,
         "is_v2": version.startswith("shadow_memory/full/v2"),
+        "is_v3": version.startswith("shadow_memory/full/v3"),
+        "story": data.get("story") if isinstance(data.get("story"), dict) else None,
         "persona": persona,
         "facts": facts,
         "events": events,
@@ -554,7 +556,7 @@ class SeedService:
                 await self.db.execute("DELETE FROM insights WHERE bot_id=?", (bot_id,))
                 await self.db.execute("DELETE FROM fact_candidates WHERE bot_id=?", (bot_id,))
                 await self.db.execute("DELETE FROM persona_entries WHERE bot_id=?", (bot_id,))
-                if normalized["is_v2"]:
+                if normalized["is_v2"] or normalized["is_v3"]:
                     await self.db.execute("DELETE FROM notes WHERE bot_id=?", (bot_id,))
             for event in normalized["events"]:
                 ended = event["ended_at"] or stamp
@@ -660,6 +662,17 @@ class SeedService:
                     ),
                 )
                 counts["notes"] += 1
+            if normalized["is_v3"]:
+                from ..story import carry
+
+                await carry.replace_world(
+                    self.db,
+                    bot_id,
+                    normalized.get("story"),
+                    source=str(data.get("bot_id") or ""),
+                    event_id_map=id_map,
+                    now=stamp,
+                )
 
         for event_id, entities in restored_events:
             try:

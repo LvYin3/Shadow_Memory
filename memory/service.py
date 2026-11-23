@@ -388,8 +388,10 @@ class MemoryService:
             "WHERE bot_id=? ORDER BY id DESC LIMIT 500",
             (bot_id,),
         )
+        from ..story import carry
+
         return {
-            "version": "shadow_memory/full/v2",
+            "version": "shadow_memory/full/v3",
             "bot_id": bot_id,
             "exported_at": self.now_fn(),
             "persona": [dict(row) for row in persona_rows],
@@ -397,6 +399,7 @@ class MemoryService:
             "events": [dict(row) for row in events],
             "insights": [dict(row) for row in insights],
             "notes": [dict(row) for row in notes],
+            "story": await carry.export_world(self.db, bot_id),
         }
 
     async def restore_full(

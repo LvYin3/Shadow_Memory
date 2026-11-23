@@ -3,10 +3,10 @@
 记忆模块与交互模块在这里接到 AstrBot 的钩子上：
 - ``event_message_type(ALL)``：观察消息、群聊门控；
 - ``on_llm_request``：人格块进 system prompt，回忆进临时内容段，最近 N 条聊天补进上下文；
-- ``register_web_api``：WebUI 的概览 / 明细 / 设置 / 转移 / 导入导出；
+- ``register_web_api``：WebUI 的概览 / 明细 / 配置 / 设置 / 转移 / 导入导出；
 - ``on_llm_response``：记录缓存用量与回复文本；
 - ``on_decorating_result``：丢弃最终文本并触发 post_turn；
-- ``llm_tool``：say / speak / silent / notes / memo / media / send_image / qzone / memory_search；
+- ``llm_tool``：say / speak / silent / act / notes / memo / media / send_image / qzone / memory_search；
 - 故事模块（``story/``）：后台循环巡检到期的唤醒，状态卡并入交流环境块，``/story`` 管理命令。
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Plain, Record
 from astrbot.api.platform import MessageType
 from astrbot.api.star import Context, Star, StarTools
@@ -48,7 +48,11 @@ from .interaction.decision_context import (
     context_for_gate,
     context_with_response,
 )
-from .interaction.environment import build_environment_prompt, say_example_messages
+from .interaction.environment import (
+    build_environment_prompt,
+    environment_parts,
+    say_example_messages,
+)
 from .interaction.gate import Gate
 from .interaction.commands import command_args
 from .interaction.media import MediaService
@@ -83,6 +87,10 @@ from .story.llm import ROLE_GM, StoryLLM
 from .story.service import StoryError, StoryService
 from .story.store import StoryStore
 from .story.world import WorldSeedError
+from .webui.config_form import FormError, apply as apply_config
+from .webui.config_form import describe as describe_config
+from .webui.config_form import load_schema, present as present_config
+from .webui.config_form import write_into
 from .webui.service import WebUIError, WebUIService
 
 PENDING_KEY = "shadow_memory_pending"
@@ -260,7 +268,14 @@ class Main(Star):
         media_transfer = MediaTransfer(db, self.media_lib, self.data_dir)
         transfer = TransferService(db, configs, persona, edges, media_transfer, audit)
         story_store = StoryStore(db)
-        story_llm = StoryLLM(self._resolve_story_provider, audit)
+        async def story_direct(system: str, user: str) -> str | None:
+            return await textgen.complete(system, user, thinking="enabled")
+
+        story_llm = StoryLLM(
+            self._resolve_story_provider,
+            audit,
+            direct=story_direct if textgen.base_url else None,
+        )
         self.story = StoryService(
             configs=configs,
             store=story_store,
@@ -272,10 +287,13 @@ class Main(Star):
                 llm=story_llm,
                 audit=audit,
                 base_card=self._resolve_base_card,
+                send_text=self._story_send,
+                search_tools=self._story_web_search,
             ),
             llm=story_llm,
             audit=audit,
             base_card=self._resolve_base_card,
+            platform_issue=self._platform_issue,
         )
         self.webui = WebUIService(
             db,
@@ -338,6 +356,34 @@ class Main(Star):
             )
         return sorted(items, key=lambda item: item["id"])
 
+    def _list_chat_providers(self) -> list[dict[str, str]]:
+        try:
+            providers = self.context.get_all_providers()
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("列出对话模型失败：%s", exc)
+            return []
+        items: list[dict[str, str]] = []
+        for provider in providers:
+            try:
+                meta = provider.meta()
+                provider_id = str(getattr(meta, "id", "") or "")
+                model = str(getattr(meta, "model", "") or "")
+            except Exception:  # noqa: BLE001
+                provider_id = str(
+                    (getattr(provider, "provider_config", {}) or {}).get("id", "") or ""
+                )
+                model = ""
+            if not provider_id:
+                continue
+            items.append(
+                {
+                    "id": provider_id,
+                    "label": f"{provider_id} ({model})" if model else provider_id,
+                    "model": model,
+                }
+            )
+        return sorted(items, key=lambda item: item["id"])
+
     def _register_web_apis(self) -> None:
         # Dashboard 用 metadata.name（shadow_memory）作为扩展路径前缀；
         # 目录名/历史别名兼容不同加载方式。
@@ -358,6 +404,12 @@ class Main(Star):
             ("import", self.web_import, ["POST"], "import memory"),
             ("story", self.web_story, ["GET"], "story overview"),
             ("story/action", self.web_story_action, ["POST"], "story action"),
+            ("story/spoiler", self.web_story_spoiler, ["GET"], "story spoiler"),
+            ("story/seed", self.web_story_seed, ["POST"], "replace world seed"),
+            ("story/note", self.web_story_note, ["POST"], "save story note"),
+            ("story/note/delete", self.web_story_note_delete, ["POST"], "delete story note"),
+            ("config", self.web_config_get, ["GET"], "plugin config"),
+            ("config", self.web_config_save, ["POST"], "save plugin config"),
         ]
         registered: list[str] = []
         for name in sorted(names):
@@ -380,13 +432,13 @@ class Main(Star):
 
     @staticmethod
     def _web_error(exc: Exception):
-        return error_response(str(exc), 400)
+        return error_response(str(exc), status_code=400)
 
     async def web_overview(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         try:
             return json_response(await self.webui.overview())
         except Exception as exc:  # noqa: BLE001
@@ -394,9 +446,9 @@ class Main(Star):
 
     async def web_detail(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         try:
             return json_response(
                 await self.webui.detail(str(request.query.get("bot", "") or ""))
@@ -406,9 +458,9 @@ class Main(Star):
 
     async def web_settings_get(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         try:
             return json_response(await self.webui.settings())
         except Exception as exc:  # noqa: BLE001
@@ -416,12 +468,12 @@ class Main(Star):
 
     async def web_event_rebuild(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         payload = await request.json(default={})
         if not isinstance(payload, dict):
-            return error_response("请求体必须是 JSON 对象", 400)
+            return error_response("请求体必须是 JSON 对象", status_code=400)
         try:
             event_id = int(payload.get("event_id") or 0)
             result = await self.webui.rebuild_event(
@@ -433,12 +485,12 @@ class Main(Star):
 
     async def web_settings_save(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         payload = await request.json(default={})
         if not isinstance(payload, dict):
-            return error_response("请求体必须是 JSON 对象", 400)
+            return error_response("请求体必须是 JSON 对象", status_code=400)
         try:
             result = await self.webui.save_settings(
                 str(payload.get("bot") or ""),
@@ -454,9 +506,9 @@ class Main(Star):
 
     async def web_transfer_preview(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         payload = await request.json(default={})
         try:
             result = await self.webui.transfer_preview(
@@ -471,9 +523,9 @@ class Main(Star):
 
     async def web_transfer(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         payload = await request.json(default={})
         try:
             result = await self.webui.transfer_memory(
@@ -489,9 +541,9 @@ class Main(Star):
 
     async def web_export(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         try:
             path, filename = await self.webui.export_memory(
                 str(request.query.get("bot", "") or ""),
@@ -505,18 +557,18 @@ class Main(Star):
 
     async def web_import(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         raw = await request.body()
         if len(raw) > 10 * 1024 * 1024:
-            return error_response("备份文件超过 10MB", 413)
+            return error_response("备份文件超过 10MB", status_code=413)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            return error_response("不是合法的 JSON 文件", 400)
+            return error_response("不是合法的 JSON 文件", status_code=400)
         if not isinstance(payload, dict):
-            return error_response("请求体必须是 JSON 对象", 400)
+            return error_response("请求体必须是 JSON 对象", status_code=400)
         try:
             result = await self.webui.import_memory(
                 str(payload.get("bot") or ""),
@@ -527,11 +579,55 @@ class Main(Star):
         except Exception as exc:  # noqa: BLE001
             return self._web_error(exc)
 
+    async def web_config_get(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        try:
+            schema = load_schema()
+            bots = await self.webui.bot_ids()
+            return json_response(
+                {
+                    "groups": describe_config(schema),
+                    "values": present_config(schema, self.astrbot_config),
+                    "providers": self._list_chat_providers(),
+                    "tts_providers": self._list_tts_providers(),
+                    "bots": bots,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_config_save(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            updated = apply_config(load_schema(), self.astrbot_config, payload)
+        except FormError as exc:
+            return error_response(str(exc), status_code=400)
+        write_into(self.astrbot_config, updated)
+        save = getattr(self.astrbot_config, "save_config", None)
+        if not callable(save):
+            return error_response("这份配置不能写回文件", status_code=500)
+        try:
+            save()
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("配置已在本次运行生效，但写回文件失败：%s", exc)
+            return error_response(f"配置已在本次运行生效，但没能写回文件：{exc}", status_code=500)
+        self.audit.event("config_saved")
+        return json_response({"ok": True, "values": present_config(load_schema(), self.astrbot_config)})
+
     async def web_story(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         try:
             return json_response(await self.webui.story_overview())
         except Exception as exc:  # noqa: BLE001
@@ -539,12 +635,12 @@ class Main(Star):
 
     async def web_story_action(self):
         if not self._web_user():
-            return error_response("未登录", 401)
+            return error_response("未登录", status_code=401)
         if self.webui is None:
-            return error_response("插件还没准备好", 503)
+            return error_response("插件还没准备好", status_code=503)
         payload = await request.json(default={})
         if not isinstance(payload, dict):
-            return error_response("请求体必须是 JSON 对象", 400)
+            return error_response("请求体必须是 JSON 对象", status_code=400)
         try:
             action = str(payload.get("action") or "")
             result = await self.webui.story_action(str(payload.get("bot") or ""), action)
@@ -554,6 +650,64 @@ class Main(Star):
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
             return json_response(result)
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_story_spoiler(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        try:
+            return json_response(
+                await self.webui.story_spoiler(str(request.query.get("bot", "") or ""))
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_story_seed(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        bot_id = str(payload.get("bot") or "")
+        try:
+            return json_response(await self.webui.story_save_seed(bot_id, payload))
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_story_note(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.story_save_note(str(payload.get("bot") or ""), payload)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_story_note_delete(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.story_delete_note(
+                    str(payload.get("bot") or ""), int(payload.get("id") or 0)
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             return self._web_error(exc)
 
@@ -611,10 +765,20 @@ class Main(Star):
             except Exception as exc:  # noqa: BLE001 - 单个作业失败不阻断启动
                 self.audit.warn("注册作业 %s 失败：%s", name, exc)
 
+    async def _story_job_bots(self) -> list[str]:
+        """夜间作业：真实机器人和活跃配角。休眠配角跳过。"""
+        if self.memory is None:
+            return []
+        ids = [str(item) for item in await self.memory.bot_ids()]
+        if self.story is None:
+            return ids
+        dormant = await self.story.store.npc_bot_ids("dormant")
+        return [item for item in ids if item not in dormant]
+
     async def _job_decay(self) -> None:
         if self.memory is None:
             return
-        for bot_id in await self.memory.bot_ids():
+        for bot_id in await self._story_job_bots():
             try:
                 await self.memory.decay(bot_id)
             except Exception as exc:  # noqa: BLE001
@@ -623,7 +787,7 @@ class Main(Star):
     async def _job_facts(self) -> None:
         if self.memory is None:
             return
-        for bot_id in await self.memory.bot_ids():
+        for bot_id in await self._story_job_bots():
             try:
                 await self.memory.extract_facts(bot_id)
             except Exception as exc:  # noqa: BLE001
@@ -632,7 +796,7 @@ class Main(Star):
     async def _job_consolidate(self) -> None:
         if self.memory is None:
             return
-        for bot_id in await self.memory.bot_ids():
+        for bot_id in await self._story_job_bots():
             try:
                 await self.memory.consolidate(bot_id)
             except Exception as exc:  # noqa: BLE001
@@ -660,7 +824,7 @@ class Main(Star):
         while True:
             try:
                 if self.memory is not None:
-                    for bot_id in await self.memory.bot_ids():
+                    for bot_id in await self._story_job_bots():
                         due, reason = await self.memory.distiller.due(bot_id)
                         if due:
                             await self.memory.distill(bot_id, reason)
@@ -723,6 +887,10 @@ class Main(Star):
                 await self._observe(event)
             except Exception as exc:  # noqa: BLE001 - 记忆失败不能打断对话
                 self.audit.warn("on_message 记忆失败：%s", exc)
+        try:
+            await self._maybe_story_remote(event)
+        except Exception as exc:  # noqa: BLE001 - 远方动作判定不能打断对话
+            self.audit.warn("远方动作判定失败：%s", exc)
 
     def _is_group_event(self, event: AstrMessageEvent) -> bool:
         return event.get_message_type() == MessageType.GROUP_MESSAGE or bool(
@@ -812,6 +980,12 @@ class Main(Star):
                 )
             except Exception as exc:  # noqa: BLE001 - 读不到覆盖就按配置走
                 self.audit.warn("读取门控问题覆盖失败：%s", exc)
+        situation = ""
+        if self.story is not None:
+            try:
+                situation = await self.story.situation_line(event.get_platform_id())
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("读取状态卡失败：%s", exc)
         decision = await self.gate_svc.judge(
             bot_id=event.get_platform_id(),
             umo=event.unified_msg_origin,
@@ -820,6 +994,7 @@ class Main(Star):
             message_id=str(getattr(event.message_obj, "message_id", "") or ""),
             conversation=conversation,
             question_override=question_override,
+            situation=situation,
         )
         self.audit.event(
             "group_gate",
@@ -1022,15 +1197,31 @@ class Main(Star):
             await self._inject_context(event, req)
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("固定上下文注入失败：%s", exc)
+        rules, life = "", ""
+        try:
+            rules, life = await self._environment_parts(event)
+            self._append_system(req, rules)
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("交流环境注入失败：%s", exc)
         try:
             await self._inject(event, req, raw_context)
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("注入失败：%s", exc)
             self.audit.debug("persona_inject_error", bot_id=event.get_platform_id(), error=str(exc))
         try:
-            await self._inject_environment(event, req)
+            self._append_system(req, life)
+            if rules or life:
+                chat_type, _, _ = self._chat_scene(event)
+                self.audit.debug(
+                    "environment_injected",
+                    bot_id=event.get_platform_id(),
+                    chat_type=chat_type,
+                    chars=len(rules) + len(life),
+                    story_lines=life.count("\n") if life else 0,
+                    preview=(rules or life).replace("\n", " | ")[:180],
+                )
         except Exception as exc:  # noqa: BLE001
-            self.audit.warn("交流环境注入失败：%s", exc)
+            self.audit.warn("故事状态卡注入失败：%s", exc)
         try:
             self._inject_say_example(event, req)
         except Exception as exc:  # noqa: BLE001
@@ -1065,15 +1256,22 @@ class Main(Star):
             return "private", "", ""
         return "other", "", ""
 
-    async def _inject_environment(self, event: AstrMessageEvent, req: Any) -> None:
+    @staticmethod
+    def _append_system(req: Any, block: str) -> None:
+        if not block:
+            return
+        current = getattr(req, "system_prompt", "") or ""
+        req.system_prompt = (current.rstrip() + "\n\n" + block) if current.strip() else block
+
+    async def _environment_parts(self, event: AstrMessageEvent) -> tuple[str, str]:
         cfg = self.cfg(event.get_platform_id())
         if not cfg.bool("interaction.enabled", True):
-            return
+            return "", ""
         if not cfg.bool("interaction.environment.enabled", True):
-            return
+            return "", ""
         chat_type, group_name, group_id = self._chat_scene(event)
         life_lines = await self._story_lines(event.get_platform_id())
-        block = build_environment_prompt(
+        return environment_parts(
             platform=event.get_platform_name(),
             chat_type=chat_type,
             group_name=group_name,
@@ -1082,10 +1280,16 @@ class Main(Star):
             rules=cfg.str("interaction.environment.prompt", "").strip(),
             life_lines=life_lines,
         )
+
+    async def _inject_environment(self, event: AstrMessageEvent, req: Any) -> None:
+        """整块追加。直接调用时规则和状态卡仍在一起；聊天请求走拆开的顺序。"""
+        rules, life = await self._environment_parts(event)
+        block = f"{rules}\n\n{life}" if rules and life else (rules or life)
         if not block:
             return
-        current = getattr(req, "system_prompt", "") or ""
-        req.system_prompt = (current.rstrip() + "\n\n" + block) if current.strip() else block
+        chat_type, _, _ = self._chat_scene(event)
+        self._append_system(req, block)
+        life_lines = await self._story_lines(event.get_platform_id())
         self.audit.debug(
             "environment_injected",
             bot_id=event.get_platform_id(),
@@ -1746,7 +1950,9 @@ class Main(Star):
             if provider is not None:
                 return provider
         try:
-            return await self.context.get_using_provider_async(umo or "")
+            return await self.context.get_using_provider_async(
+                umo or self._bot_umo(bot_id)
+            )
         except Exception:  # noqa: BLE001
             return None
 
@@ -1766,27 +1972,24 @@ class Main(Star):
             self.audit.warn("故事模块配置的 provider 不可用：%s=%s", key, provider_id)
             return None
         try:
-            return await self.context.get_using_provider_async("")
+            return await self.context.get_using_provider_async(self._bot_umo(bot_id))
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("取默认对话模型失败：%s", exc)
             return None
 
-    async def _resolve_base_card(self, bot_id: str) -> tuple[str, str]:
-        """场景中她的基础人设与来源。
+    @staticmethod
+    def _bot_umo(bot_id: str, message_type: str = "OtherMessage") -> str:
+        """无聊天会话时用来匹配该机器人在 AstrBot 里的配置文件路由。"""
+        bot = (bot_id or "").strip()
+        if not bot:
+            return ""
+        return f"{bot}:{message_type}:__shadow_bot__"
 
-        顺序：story.base_card → plugin_only 模式下的 persona.base_card → AstrBot 默认人格。
-        AstrBot 内置的通用默认人格（“helpful assistant”）不算人设。
-        """
-        cfg = self.cfg(bot_id)
-        text = cfg.str("story.base_card").strip()
-        if text:
-            return text, "story.base_card"
-        if cfg.str("persona.mode", "append") == "plugin_only":
-            text = cfg.str("persona.base_card").strip()
-            if text:
-                return text, "persona.base_card"
+    async def _astrbot_default_persona(self, umo: str) -> tuple[str, str]:
         try:
-            persona = await self.context.persona_manager.get_default_persona_v3()
+            persona = await self.context.persona_manager.get_default_persona_v3(
+                umo or None
+            )
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("读取 AstrBot 默认人格失败：%s", exc)
             return "", ""
@@ -1808,10 +2011,34 @@ class Main(Star):
             return "", ""
         return prompt, f"AstrBot 默认人格「{name or '未命名'}」"
 
+    async def _resolve_base_card(self, bot_id: str) -> tuple[str, str]:
+        """场景中她的基础人设与来源。
+
+        顺序：story.base_card → plugin_only 模式下的 persona.base_card → AstrBot 默认人格。
+        AstrBot 内置的通用默认人格（“helpful assistant”）不算人设。
+        """
+        cfg = self.cfg(bot_id)
+        text = cfg.str("story.base_card").strip()
+        if text:
+            return text, "story.base_card"
+        if cfg.str("persona.mode", "append") == "plugin_only":
+            text = cfg.str("persona.base_card").strip()
+            if text:
+                return text, "persona.base_card"
+        prompt, source = await self._astrbot_default_persona(
+            self._bot_umo(bot_id, "OtherMessage")
+        )
+        if prompt or not (bot_id or "").strip():
+            return prompt, source
+        return await self._astrbot_default_persona(
+            self._bot_umo(bot_id, "FriendMessage")
+        )
+
     async def _resolve_vision_provider(self, bot_id: str, umo: str) -> Any:
         cfg = self.cfg(bot_id)
         try:
-            settings = self.context.get_config().get("provider_settings", {}) or {}
+            config = self.context.get_config(umo=umo or self._bot_umo(bot_id)) or {}
+            settings = config.get("provider_settings", {}) or {}
         except Exception:  # noqa: BLE001
             settings = {}
         provider_id = pick_vision_provider_id(cfg, settings)
@@ -1837,11 +2064,113 @@ class Main(Star):
             return provider
         return None
 
+    def _story_web_search(self, bot_id: str = ""):
+        """背景模型用的网页搜索。没在 AstrBot 里打开时返回 None。"""
+        from .story.websearch import story_search
+
+        return story_search(self.context, umo=self._bot_umo(bot_id))
+
+    async def _story_send(self, umo: str, text: str) -> bool:
+        return await self._send_to(umo, MessageChain(chain=[Plain(text)]))
+
+    async def _maybe_story_remote(self, event: AstrMessageEvent) -> None:
+        if self.story is None:
+            return
+        text = (event.message_str or "").strip()
+        if not text:
+            return
+        if self._is_group_event(event) and not event.is_at_or_wake_command:
+            return
+        await self.story.note_seen_message(
+            event.get_platform_id(),
+            event.unified_msg_origin,
+            event.get_sender_name() or "",
+            text,
+        )
+
+    def _find_platform_inst(self, bot_id: str) -> tuple[list[Any], Any | None]:
+        bot = (bot_id or "").strip()
+        try:
+            instances = list(self.context.platform_manager.get_insts() or [])
+        except Exception:  # noqa: BLE001
+            return [], None
+        if not bot:
+            return instances, None
+        for instance in instances:
+            try:
+                meta = instance.meta()
+                if str(getattr(meta, "id", "") or "").strip() == bot:
+                    return instances, instance
+            except Exception:  # noqa: BLE001
+                continue
+        return instances, None
+
+    def _platform_issue(self, bot_id: str) -> str:
+        """检查机器人平台适配器是否已加载且具备发送通道；正常或无法判断时返回空串。"""
+        bot = (bot_id or "").strip()
+        if not bot:
+            return ""
+        instances, instance = self._find_platform_inst(bot)
+        if not instances:
+            return ""
+        if instance is None:
+            return "平台适配器未启用或未加载"
+        raw_status = getattr(instance, "status", None)
+        status = str(getattr(raw_status, "value", raw_status) or "").strip().lower()
+        if status in {"error", "stopped"}:
+            return f"平台适配器当前状态为 {status}，暂不可收发消息"
+        try:
+            meta_name = str(getattr(instance.meta(), "name", "") or "").strip().lower()
+        except Exception:  # noqa: BLE001
+            meta_name = ""
+        if meta_name == "aiocqhttp":
+            cq_bot = getattr(instance, "bot", None)
+            api_clients = getattr(cq_bot, "_wsr_api_clients", None)
+            if isinstance(api_clients, dict) and len(api_clients) == 0:
+                event_clients = getattr(cq_bot, "_wsr_event_clients", None)
+                if isinstance(event_clients, (set, dict, list, tuple)) and len(event_clients) > 0:
+                    return (
+                        "aiocqhttp 只连上了事件端（/ws/event），缺少 API 通道"
+                        "（请改用 /ws 通用反向 WebSocket），主动消息发不出去"
+                    )
+                return (
+                    "aiocqhttp 反向 WebSocket 尚未连接"
+                    "（请检查 NapCat 反向 WS 地址 /ws、端口与 Token），主动消息暂不可发"
+                )
+        return ""
+
+    def _diagnose_send_failure(self, umo: str, exc: Exception) -> str:
+        bot_id = (umo or "").split(":", 1)[0].strip()
+        issue = self._platform_issue(bot_id)
+        if issue:
+            return issue
+        _, instance = self._find_platform_inst(bot_id)
+        if instance is not None:
+            cq_bot = getattr(instance, "bot", None)
+            api_clients = getattr(cq_bot, "_wsr_api_clients", None)
+            if isinstance(api_clients, dict) and len(api_clients) > 1:
+                return (
+                    f"aiocqhttp 存在 {len(api_clients)} 个反向 WS 连接"
+                    f"（ws_api_clients={len(api_clients)}），按会话发送缺少唯一 self_id"
+                )
+        if type(exc).__name__ == "ApiNotAvailable":
+            return "OneBot API 通道当前不可用（请检查 NapCat 反向 WebSocket 连接）"
+        return ""
+
     async def _send_to(self, umo: str, chain: Any) -> bool:
         try:
-            return bool(await self.context.send_message(umo, chain))
+            ok = bool(await self.context.send_message(umo, chain))
+            if not ok:
+                issue = self._platform_issue((umo or "").split(":", 1)[0])
+                detail = issue or "未找到匹配的已加载平台实例"
+                self.audit.warn("跨会话发送失败（umo=%s）：%s", umo, detail)
+            return ok
         except Exception as exc:  # noqa: BLE001
-            self.audit.warn("跨会话发送失败：%s", exc)
+            body = str(exc).strip()
+            label = f"{type(exc).__name__}: {body}" if body else type(exc).__name__
+            hint = self._diagnose_send_failure(umo, exc)
+            suffix = f"（{hint}）" if hint else ""
+            self.audit.warn("跨会话发送失败（umo=%s）：%s%s", umo, label, suffix)
             return False
 
     async def _schedule_memo(
@@ -1928,7 +2257,37 @@ class Main(Star):
         """这一轮决定不说话。不要用空的 say 代替；决定不回复时调用。"""
         if self.sender is None:
             return "好"
-        return self.sender.silent(event)
+        result = self.sender.silent(event)
+        if (
+            self.story is not None
+            and not self._is_group_event(event)
+            and (event.message_str or "").strip()
+        ):
+            await self.story.note_unread(
+                event.get_platform_id(),
+                event.unified_msg_origin,
+                event.get_sender_name() or "",
+                event.message_str.strip(),
+            )
+        return result
+
+    @filter.llm_tool("act")
+    async def tool_act(self, event: AstrMessageEvent, intent: str, now: bool = False) -> str:
+        """把一件要去做的事交给故事。裁定之后再回来告诉对方，不要在聊天里宣布还没发生的结果。
+
+        Args:
+            intent(string): 要去做的事，一句话（必填）
+            now(boolean): 是否现在就去。为 true 且还有故事额度时，下一场会提前开始
+        """
+        if self.story is None:
+            return "我这会儿安排不了这件事。"
+        return await self.story.propose(
+            event.get_platform_id(),
+            event.unified_msg_origin,
+            self._display_name(event) or event.get_sender_name() or "对方",
+            intent,
+            wake_now=bool(now),
+        )
 
     async def _memo_target(self, event: AstrMessageEvent, session: str) -> str | bool:
         target = (session or "").strip()
@@ -2545,6 +2904,9 @@ class Main(Star):
         problems = data.get("problems") or []
         if problems:
             lines.append("还缺：" + "；".join(problems))
+        platform_warning = str(data.get("platform_warning") or "").strip()
+        if platform_warning:
+            lines.append(f"平台状态：{platform_warning}")
         return "\n".join(lines)
 
     @staticmethod

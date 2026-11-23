@@ -215,7 +215,7 @@ async def test_unexpected_error_is_treated_as_a_failure(env, monkeypatch):
     async def boom(*args, **kwargs):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(env.store, "apply_notes", boom)
+    monkeypatch.setattr(env.store, "add_canon", boom)
     assert await env.service.tick() == []
     state = await env.store.state(BOT)
     assert state["failures"] == 1
@@ -314,7 +314,7 @@ async def test_status_shows_her_view_not_the_spoilers(env):
     script_scene(env)
     await env.service.tick()
     status = await env.service.status(BOT)
-    assert status["scenes_total"] == 1 and status["notes"] == 1
+    assert status["scenes_total"] == 1 and status["notes"] == 0
     assert status["canon"] == {"seed": 2, "play": 1}
     assert status["card_lines"] == ["- 我现在在便利店，正在躲雨，大概到14:40。"]
     scene = status["scenes"][0]
@@ -336,7 +336,8 @@ async def test_export_is_complete(env):
     assert data["state"]["card"]["where"] == "便利店"
     assert data["state"]["seed_meta"]["hooks"] == ["期末前要交一份小组报告"]
     assert [row["name"] for row in data["canon"]] == ["青屿大学", "阿澄", "便利店老板"]
-    assert data["notes"][0]["body"] == "室友阿澄在瞒着她找工作"
+    assert data["notes"] == []
+    assert "暗线" in data["state"]["tree"]
     scene = data["scenes"][0]
     assert scene["summary"] == CLOSING["summary"]
     assert scene["transcript"][1]["inner"] == "其实不想回去"
@@ -351,3 +352,45 @@ async def test_bots_are_independent(env):
     assert await env.service.tick() == ["bot1"]
     assert (await env.service.status("bot2"))["scenes_total"] == 0
     assert await env.db.scalar("SELECT COUNT(*) FROM events WHERE bot_id='bot2'") == 0
+
+
+async def test_platform_offline_defers_tick_and_blocks_manual_wake(env, caplog):
+    import logging
+
+    issue = {"text": "aiocqhttp 反向 WebSocket 尚未连接"}
+    env.service._platform_issue = lambda bot_id: issue["text"]
+
+    # 平台尚未连上时仍允许导入种子和开启故事，状态里透出 platform_warning
+    await env.service.import_seed(BOT, world_seed())
+    enabled = await env.service.enable(BOT)
+    assert enabled["enabled"] is True
+    assert enabled["problems"] == []
+    assert enabled["platform_warning"] == issue["text"]
+    tokens_before = enabled["tokens"]
+
+    # 定时巡检暂缓唤醒：不跑场、不扣额度、不记失败，连续巡检不重复刷等待日志
+    with caplog.at_level(logging.INFO, logger="pm-test"):
+        assert await env.service.tick() == []
+        assert await env.service.tick() == []
+    state = await env.store.state(BOT)
+    assert int(state["failures"] or 0) == 0
+    assert (await env.service.status(BOT))["tokens"] == tokens_before
+    assert (await env.service.status(BOT))["scenes_total"] == 0
+    wait_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if "story_wait_platform" in record.getMessage()
+    ]
+    assert len(wait_logs) == 1
+
+    # 手动立即演一场直接告知平台未连接
+    with pytest.raises(StoryError, match="反向 WebSocket 尚未连接"):
+        await env.service.wake(BOT)
+
+    # 平台恢复连接后，下一轮巡检正常唤醒
+    issue["text"] = ""
+    script_scene(env)
+    assert await env.service.tick() == [BOT]
+    after = await env.service.status(BOT)
+    assert after["platform_warning"] == ""
+    assert after["scenes_total"] == 1

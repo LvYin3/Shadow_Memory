@@ -82,7 +82,11 @@ _GM_SYSTEM = """你是一个故事的主持人。故事的主角是“她”，�
 - 时间与现实同步，按“现在”给出的真实日期和时刻来写。一场只写眼前这一小段，从“现在”起最多十来分钟；不要在叙述里把钟点往后拨。要跳过更长的时间，就收场，让那段时间真的过去。
 - 不要为了凑轮数拖着：她没有要做的决定，或者只是在重复同一个状态（睡觉、发呆、赶路），就该收场。
 - 她手机（或世界设定里的等价物）那头是现实里真实存在的人，不属于这个世界，也不归你来演。他们说过的话只是话，不等于事实。叙述里不要出现他们的名字，不要有来自他们的新消息、来电或回复，他们也不会出场：他们什么时候找她、说什么，只由现实决定。她要是想联系他们，那不在这一场里发生，让她先搁下，不要写出对方的任何反应。
-- 涉及设定时以“世界大纲 / 相关设定 / 你的笔记”为准；里面没有的才可以新编，新编的要在收场时登记。
+- 涉及设定时以“世界大纲 / 故事树”为准；正文不在手头就放进 lookup。里面没有的才可以新编，新编的要在收场时登记。
+- 故事树只给你看线和连着谁。read_story_notes 一次读完留给下一场的提示。write_story_note 一场最多一条，只写树上没有、下一场必须知道的事；不写也行。
+- 配角名单里的人可以写进 present，由他们自己行动；名单外的人是龙套，仍由你代演。promote_npc 和 retire_npc 只是登记，这一场你照样演那个新人。
+- 可以搜索网页来核对不确定的资料。世界种子若是真实世界，可以查她此刻所在地的天气和当地事件。
+- 写进叙述的必须是她能感知到的，比如看手机、听广播、走到窗外。不要写「我搜索了」，不要贴原始链接。工具没返回，就当没有这次资料，不要编造。
 - 朴素具体，不抒情，不总结，不替她下结论。
 - 只输出一个 JSON 对象，不要解释，不要 markdown 围栏。"""
 
@@ -96,7 +100,7 @@ GM_SYSTEM = gm_system()
 _GM_OPEN_TASK_BACKFILL = """# 任务：开场
 1. backfill：概括从上一场结束到现在这段空白里她大致做了什么。以状态卡为依据，平淡带过，不安排转折，不超过 120 字，<<hint>>。
 2. narration：写出此刻她面前的情境，不超过 200 字，停在需要她自己决定做什么的地方。
-3. lookup：想查的东西：设定名、笔记标题、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
+3. lookup：想查的东西：设定名、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
 
 输出：{"backfill": "", "narration": "", "lookup": []}"""
 GM_OPEN_TASK_BACKFILL = _GM_OPEN_TASK_BACKFILL.replace(
@@ -106,14 +110,14 @@ GM_OPEN_TASK_BACKFILL = _GM_OPEN_TASK_BACKFILL.replace(
 GM_OPEN_TASK_PLAIN = """# 任务：开场
 1. backfill：这次不需要补叙，留空字符串。
 2. narration：写出此刻她面前的情境，不超过 200 字，停在需要她自己决定做什么的地方。
-3. lookup：想查的东西：设定名、笔记标题、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
+3. lookup：想查的东西：设定名、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
 
 输出：{"backfill": "", "narration": "", "lookup": []}"""
 
 GM_OPEN_TASK_FIRST = """# 任务：开场（这是故事的第一场）
 1. backfill：留空字符串。
 2. narration：从世界大纲给出的起点开始，写出此刻她面前的情境，不超过 200 字，停在需要她自己决定做什么的地方。
-3. lookup：想查的东西：设定名、笔记标题、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
+3. lookup：想查的东西：设定名、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
 
 输出：{"backfill": "", "narration": "", "lookup": []}"""
 
@@ -122,9 +126,10 @@ GM_TURN_TASK = """# 任务：裁定她刚才的行动，并写出接下来她感
 - 结果没有悬念：check 填 null，在 narration 里直接写结果和接下来的情境（不超过 200 字）。
 - 结果有悬念：填 check，narration 留空。likelihood 只能是：{likelihoods}。success 和 failure 各写一段完整的后续（各不超过 150 字），两段都要认真写，因为你不知道骰子会选哪一段。
 - 先判断这一场该不该结束：事情告一段落、接下来是一段不需要她做决定的平淡时间、或者她这一步没有实质行动，就把 end 设为 true，narration 只写一两句收住。{last_hint}
-- lookup：想查的东西：设定名、笔记标题、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
+- lookup：想查的东西：设定名、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
+- settled：这一场已经给出结果的意图编号（开场名单里的 #编号），没有就给空数组。还没演到结果的不要填。
 
-输出：{{"check": null, "narration": "", "lookup": [], "end": false}}
+输出：{{"check": null, "narration": "", "lookup": [], "settled": [], "end": false}}
 check 的格式：{{"what": "她想做成的事", "likelihood": "很可能", "success": "", "failure": ""}}"""
 
 GM_TURN_LAST_HINT = "这已经是本场最后一轮，end 必须为 true。"
@@ -133,12 +138,37 @@ GM_CLOSE_TASK = """# 任务：收场
 这一场结束了。请给出：
 - epilogue：可选的一两句收尾，只写周围的环境和别人的动静（{hint}）；不要让她再做任何动作、说任何话，也不要替她做决定。没有就留空。
 - card：她的状态卡。where 是地点短语；doing 是她这一场结束时正在做、并且会持续一阵的事（不带主语的短语，如“写课程论文”），不要替她做她还没做的决定；minutes 是这件事预计还要持续多少分钟；phone 是这期间看手机“方便”还是“不方便”。
-- next_wake_minutes：多少分钟后再继续故事（{min_wake}–{max_wake}）。接下来没有波澜，就等这件事结束再继续；步步都有变化，才短一些。预约得越密，额度花得越快。
-- canon：这一场里新确立、以后要长期保持一致的设定：某个人是谁、某个地方在哪、某样东西是什么、某条规矩。每条 {{"name": "", "category": "人物/地点/组织/规则/物品/其他", "body": ""}}。这一场发生了什么不算设定（那写进 summary 或 notes）；没有就给空数组。
-- notes：你想新增或改写的笔记（暗线、伏笔、其他人此刻在做什么、悬而未决的事、后续打算），每条 {{"title": "", "body": ""}}；body 留空表示删掉这条；没有就给空数组。偶然种子用上了就不必为它写笔记。
+- next_wake_minutes：多少分钟后再继续故事（{span}）。接下来没有波澜，就等这件事结束再继续；步步都有变化，才短一些。预约得越密，额度花得越快。
+- canon：这一场里新确立、以后要长期保持一致的设定：某个人是谁、某个地方在哪、某样东西是什么、某条规矩。每条 {{"name": "", "category": "人物/地点/组织/规则/物品/其他", "body": ""}}。这一场发生了什么不算设定（那写进 summary）；没有就给空数组。
+- tree：未了结的线。每条 {{"title": "", "people": [], "canon": [], "seed": [], "scenes": []}}。people 只写配角或设定里的人物。canon 写设定集里的名字，seed 写世界种子里的名字。scenes 写已经演过的场编号；这一场用 0。没有就给空数组。日常节点不用写。
 - summary：给你自己看的本场梗概，用第三人称“她”，不超过 120 字。
+- remote：开场名单里还开着的远方动作，有结果就写 {{"id": 编号, "outcome": "到了/没到/她没管"}}。没碰到、或还没了结的不要写，名字会继续放开。
 
-输出：{{"epilogue": "", "card": {{"where": "", "doing": "", "minutes": 60, "phone": "方便"}}, "next_wake_minutes": 60, "canon": [], "notes": [], "summary": ""}}"""
+输出：{{"epilogue": "", "card": {{"where": "", "doing": "", "minutes": 60, "phone": "方便"}}, "next_wake_minutes": 60, "canon": [], "tree": {{"threads": []}}, "summary": "", "remote": []}}"""
+
+
+THINK_DETECTOR_SYSTEM = """你在决定这场故事要不要为「已经发生、还没收尾的事」多想一步。
+故事树上有还没了结的线（欠的钱、账单、约好要来的人、答应过还没回的话），think 填 true。
+只有没有这种事，或者这是还没演过的第一场，才填 false。不要因为上一场的结尾看起来平常就忽略笔记。大纲里还没发生的钩子不算。
+只输出 JSON：{"think": false, "why": "不超过 30 字"}"""
+
+THINK_PLANNER_SYSTEM = """你在替这场故事列约束。她做什么、说什么由扮演她的人决定，你不能写。
+- established：已经成立、这场必须保持一致的事。
+- unresolved：还没了结、这场可能会碰到的事。碰不到也正常。
+- consequences：要是碰到了，有哪些说得通的结果。好处和麻烦都写。
+不要安排新的戏剧性，不要写她的行动。每项不超过 120 字。
+只输出 JSON：{"established": "", "unresolved": "", "consequences": ""}"""
+
+
+def render_constraints(plan: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            f"已经成立的：{str(plan.get('established') or '').strip()}",
+            f"还没了结的：{str(plan.get('unresolved') or '').strip()}",
+            f"可能的后果：{str(plan.get('consequences') or '').strip()}",
+            "这是这场的约束，不是她的行动计划。不要把它原样写进叙述，也不要替她行动。",
+        ]
+    )
 
 
 def gm_turn_task(*, last: bool) -> str:
@@ -149,9 +179,9 @@ def gm_turn_task(*, last: bool) -> str:
 
 
 def gm_close_task(*, min_wake: int, max_wake: int, style: Any = None) -> str:
-    return GM_CLOSE_TASK.format(
-        min_wake=min_wake, max_wake=max_wake, hint=narration(style).hint
-    )
+    from .link import wake_span
+
+    return GM_CLOSE_TASK.format(span=wake_span(min_wake, max_wake), hint=narration(style).hint)
 
 
 def gm_open_task(*, first: bool, backfill: bool, style: Any = None) -> str:
@@ -184,16 +214,12 @@ def gm_context(
     outline: str,
     hooks: list[str],
     opening: dict[str, str],
-    canon_lines: list[str],
     canon_index: list[str],
-    notes: list[dict[str, Any]],
-    hidden_notes: int,
-    scenes: list[str],
+    tree: str,
     card: str,
     digest: list[str],
     seed: dict[str, Any],
     last_ending: str = "",
-    past: list[str] | None = None,
 ) -> str:
     """背景模型每次调用都带的上帝视角信息。里面没有她的人格、洞察和私人笔记。"""
     now_lines = [moment]
@@ -217,7 +243,8 @@ def gm_context(
         "预约间隔比回补间隔短，就是在花积蓄。额度紧张时，把她安排进耗时长、没有波澜的活动；"
         "充足时才展开密集的场景。"
     )
-    blocks = ["# 现在\n" + "\n".join(now_lines)]
+    # 少变的在前，方便跨场命中前缀；时钟、额度、状态卡和这一场的种子放在后面。
+    blocks: list[str] = []
 
     world_lines = [title, outline] if title else [outline]
     if hooks:
@@ -225,32 +252,13 @@ def gm_context(
         world_lines.extend(f"- {hook}" for hook in hooks)
     blocks.append("# 世界大纲\n" + "\n".join(world_lines))
 
-    canon_block = canon_lines or ["（没有与此刻相关的设定）"]
+    if tree.strip():
+        blocks.append(tree.strip())
     if canon_index:
-        canon_block = [
-            *canon_block,
-            "其余设定只列名字，需要细节就把名字放进 lookup：" + "、".join(canon_index),
-        ]
-    blocks.append("# 相关设定\n" + "\n".join(canon_block))
-
-    if notes:
-        note_lines = [f"## {note['title']}\n{note['body']}" for note in notes]
-        if hidden_notes > 0:
-            note_lines.append(f"（还有 {hidden_notes} 条较早的笔记没有列出）")
-        blocks.append("# 你的笔记（她看不到）\n" + "\n".join(note_lines))
-    else:
-        blocks.append("# 你的笔记（她看不到）\n（还没有笔记）")
-
-    if past:
-        blocks.append(
-            "# 更早的、和此刻可能有关的场景\n"
-            + "\n".join(f"- {line}" for line in past)
-            + "\n想看哪一场的完整经过，就把它的编号（如 #12）放进 lookup。"
-        )
-    if scenes:
-        blocks.append("# 最近几场的梗概\n" + "\n".join(f"- {line}" for line in scenes))
+        blocks.append("未挂上的设定只列名字，需要细节就放进 lookup：" + "、".join(canon_index))
     if last_ending:
         blocks.append("# 上一场是这样收住的（接着它往下写，不要重演）\n" + last_ending)
+    blocks.append("# 现在\n" + "\n".join(now_lines))
     blocks.append("# 她目前的状态卡\n" + card)
     if digest:
         blocks.append(
@@ -263,7 +271,7 @@ def gm_context(
     blocks.append(
         "# 这次的偶然种子\n"
         f"焦点：{seed.get('focus')}；意象：{words}\n"
-        "把它解释成一件具体的事融进这一场；实在用不上，就在收场的 notes 里写一条说明为什么不用。"
+        "把它解释成一件具体的事融进这一场；实在用不上，就用 write_story_note 给下一场留一条，或在收场的 tree 里挂一条线。"
     )
     return "\n\n".join(blocks)
 
@@ -302,8 +310,26 @@ ACTOR_SCENE = """# 我这会儿
 - {narrator_line}
 - 我只决定我自己：心里怎么想，接下来做什么、说什么。事情成不成、别人怎么反应，不由我来写。
 - 我按自己的性子来，不必每次都做“正确”的事；想歇着、想拖着、想躲开都可以。
-- 这会儿没法跟手机那头聊天认识的人说上话；想找他们，就先记在心里，等聊天的时候再说。
-- 只输出一个 JSON 对象，不要解释：{{"inner": "我心里怎么想（别人看不到，不超过 60 字）", "action": "我做了什么、说了什么（第一人称，不超过 120 字）"}}"""
+- 想给手机那头的人发消息，就在 messages 里写数组。每条用 to 写对方的显示名，用 text 写要说的话；发不出去时再按给的会话号重发一次。不发就给空数组。
+- 只输出一个 JSON 对象，不要解释：{{"inner": "我心里怎么想（别人看不到，不超过 60 字）", "action": "我做了什么、说了什么（第一人称，不超过 120 字）", "messages": []}}"""
+
+
+def npc_system(name: str, *, persona: str = "", ambient: str = "") -> str:
+    blocks = [
+        f"你是{name}。你不是她，也不替她做决定。",
+        "只写你自己这一下的想法和行动。不要给别人发消息，不要替她开口。",
+        "只输出一个 JSON 对象：{\"inner\": \"心里话\", \"action\": \"你做了什么\"}。",
+    ]
+    if persona.strip():
+        blocks.append("# 你是这样的人\n" + persona.strip())
+    if ambient.strip():
+        blocks.append("# 你记得的近况\n" + ambient.strip())
+    return "\n\n".join(blocks)
+
+
+def npc_user(transcript: list[dict[str, Any]], style: Any = None) -> str:
+    body = render_transcript(transcript, viewer="gm", style=style)
+    return (body + "\n\n" if body else "") + "轮到你。只写你这一下。"
 
 
 def actor_system(
@@ -324,9 +350,14 @@ def actor_system(
 
 
 def actor_user(
-    transcript: list[dict[str, Any]], recall_parts: list[str], style: Any = None
+    transcript: list[dict[str, Any]],
+    recall_parts: list[str],
+    style: Any = None,
+    brief: str = "",
 ) -> str:
     blocks: list[str] = []
+    if brief.strip():
+        blocks.append(brief.strip())
     cleaned = [part.strip() for part in recall_parts if part and part.strip()]
     if cleaned:
         lines = ["【我的记忆，不是眼前发生的；不用主动提】"]
@@ -356,6 +387,15 @@ def render_transcript(
         if role == "narrator":
             if text:
                 lines.append(f"{tag}{text}")
+            continue
+        if role == "notice":
+            if text:
+                lines.append(text)
+            continue
+        if role == "npc":
+            if text:
+                who = str(turn.get("name") or "配角").strip()
+                lines.append(f"{who}：{text}")
             continue
         inner = str(turn.get("inner") or "").strip()
         if viewer == "gm":

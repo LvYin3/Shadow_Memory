@@ -361,6 +361,45 @@ def test_narration_styles():
     )
 
 
+def test_gm_context_keeps_the_world_ahead_of_the_clock():
+    text = prompts.gm_context(
+        moment="2026-11-23 08:00",
+        gap_ms=None,
+        tokens=3,
+        per_day=4,
+        capacity=8,
+        title="青屿",
+        outline="她是学生。",
+        hooks=["还书"],
+        opening={"where": "合租屋", "doing": "醒着"},
+        canon_index=["图书馆"],
+        tree="# 故事树\n## 暗线\n人：阿澄",
+        card="在合租屋",
+        digest=["小明说寄了茶"],
+        seed={"focus": "雨", "words": ["伞"]},
+        last_ending="她回到家。",
+    )
+    order = [
+        "# 世界大纲",
+        "# 故事树",
+        "# 上一场是这样收住的（接着它往下写，不要重演）",
+        "# 现在",
+        "# 她目前的状态卡",
+        "# 她最近在手机上和人聊过的事",
+        "# 这次的偶然种子",
+    ]
+    assert "还没还" not in text
+    positions = [text.index(heading) for heading in order]
+    assert positions == sorted(positions)
+    assert "这是故事的第一场。" in text
+    assert "起点：她在合租屋，正在醒着。" in text
+    assert "唤醒额度：剩 3.0 次" in text
+    assert "主线钩子：" in text and "- 还书" in text
+    assert "未挂上的设定只列名字" in text and "图书馆" in text
+    assert "## 暗线" in text and "人：阿澄" in text
+    assert "焦点：雨；意象：伞" in text
+
+
 def test_gm_task_templates_render():
     turn = prompts.gm_turn_task(last=True)
     assert "几乎不可能 / 不太可能 / 五五开 / 很可能 / 几乎必然" in turn

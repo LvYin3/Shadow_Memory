@@ -61,7 +61,13 @@ class StubContext:
         self.routes: dict[tuple[str, tuple[str, ...]], object] = {}
         self.default_provider = ScriptedProvider()
         self.providers: dict[str, object] = {}
+        self.providers_by_umo: dict[str, object] = {}
+        self.provider_umos: list[str] = []
         self.persona = dict(BUILTIN_PERSONA)
+        self.personas_by_umo: dict[str, dict] = {}
+        self.persona_umos: list[str | None] = []
+        self.configs_by_umo: dict[str, dict] = {}
+        self.config_umos: list[str | None] = []
 
         async def list_jobs(*args, **kwargs):
             return []
@@ -73,7 +79,8 @@ class StubContext:
             return None
 
         async def default_persona(umo=None):
-            return self.persona
+            self.persona_umos.append(umo)
+            return self.personas_by_umo.get(umo or "", self.persona)
 
         self.cron_manager = SimpleNamespace(
             list_jobs=list_jobs, add_basic_job=add_basic_job, delete_job=delete_job
@@ -88,13 +95,15 @@ class StubContext:
         return self.providers.get(provider_id)
 
     async def get_using_provider_async(self, umo=""):
-        return self.default_provider
+        self.provider_umos.append(umo)
+        return self.providers_by_umo.get(umo, self.default_provider)
 
     def get_using_provider(self, umo=""):
-        return self.default_provider
+        return self.providers_by_umo.get(umo, self.default_provider)
 
     def get_config(self, umo=None):
-        return {}
+        self.config_umos.append(umo)
+        return self.configs_by_umo.get(umo or "", {})
 
     def get_all_tts_providers(self):
         return []
@@ -146,7 +155,16 @@ def plugin_main(monkeypatch, workdir):
 
     module("astrbot")
     module("astrbot.api", logger=logging.getLogger("astrbot-stub"))
-    module("astrbot.api.event", AstrMessageEvent=object, filter=_Filter())
+    class MessageChain:
+        def __init__(self, chain=None) -> None:
+            self.chain = list(chain or [])
+
+    module(
+        "astrbot.api.event",
+        AstrMessageEvent=object,
+        filter=_Filter(),
+        MessageChain=MessageChain,
+    )
     module(
         "astrbot.api.message_components",
         Image=SimpleNamespace(fromBytes=lambda data: ("image", data)),
@@ -167,7 +185,10 @@ def plugin_main(monkeypatch, workdir):
     )
     module(
         "astrbot.api.web",
-        error_response=lambda message, status=400: {"error": message, "status": status},
+        error_response=lambda message, *, status_code=400, **kwargs: {
+            "error": message,
+            "status": status_code,
+        },
         file_response=lambda path, **kwargs: {"file": str(path), **kwargs},
         json_response=lambda data: data,
         request=request,
@@ -244,6 +265,91 @@ async def test_story_provider_never_falls_back_silently(plugin_main):
         await plugin.terminate()
 
 
+async def test_bot_routed_persona_and_config_lookup(plugin_main, monkeypatch):
+    plugin, context = await make_plugin(plugin_main, {})
+    try:
+        other_umo = "Inwind_NapCat:OtherMessage:__shadow_bot__"
+        friend_umo = "Inwind_NapCat:FriendMessage:__shadow_bot__"
+
+        # 全局 default 配置仍是内置助手，但 Inwind_NapCat 独立配置里有默认人格
+        context.personas_by_umo[other_umo] = {"name": "离光", "prompt": "她住在离光之外。"}
+        context.personas_by_umo[friend_umo] = {"name": "私聊分流", "prompt": "私聊专用人设。"}
+        assert await plugin._resolve_base_card("other_bot") == ("", "")
+        assert await plugin._resolve_base_card("Inwind_NapCat") == (
+            "她住在离光之外。",
+            "AstrBot 默认人格「离光」",
+        )
+
+        # 机器人兜底配置仍是内置助手时，回退尝试私聊通配路由
+        context.personas_by_umo[other_umo] = dict(BUILTIN_PERSONA)
+        assert await plugin._resolve_base_card("Inwind_NapCat") == (
+            "私聊专用人设。",
+            "AstrBot 默认人格「私聊分流」",
+        )
+
+        # 默认对话模型、无会话后台文本模型、视觉打标配置都走该机器人的路由 UMO
+        routed_chat = ScriptedProvider("inwind-chat")
+        routed_vision = ScriptedProvider("inwind-vision")
+        context.providers["inwind-vision"] = routed_vision
+        context.providers_by_umo[other_umo] = routed_chat
+        context.configs_by_umo[other_umo] = {
+            "provider_settings": {
+                "default_image_caption_provider_id": "inwind-vision",
+                "web_search": True,
+                "websearch_provider": "tavily",
+            }
+        }
+
+        assert await plugin._resolve_story_provider("actor", "Inwind_NapCat") is routed_chat
+        assert await plugin._resolve_text_provider("Inwind_NapCat", "") is routed_chat
+        assert await plugin._resolve_vision_provider("Inwind_NapCat", "") is routed_vision
+
+        # 故事网页搜索在启用判断与实际执行时都携带同一条机器人探测 UMO
+        seen_tool_umos: list[str] = []
+
+        class _FakeTool:
+            name = "web_search"
+
+            async def call(self, ctx, **kwargs):
+                seen_tool_umos.append(ctx.context.event.unified_msg_origin)
+                return f"searched:{kwargs.get('query', '')}"
+
+        class _FakeToolSet:
+            def __init__(self) -> None:
+                self._tools: dict[str, object] = {}
+
+            def add_tool(self, tool) -> None:
+                self._tools[tool.name] = tool
+
+            def get_tool(self, name: str):
+                return self._tools.get(name)
+
+            def empty(self) -> bool:
+                return not self._tools
+
+        fake_tool = _FakeTool()
+        context.get_llm_tool_manager = lambda: SimpleNamespace(
+            get_builtin_tool=lambda cls: fake_tool if cls is _FakeTool else None
+        )
+        tool_mod = types.ModuleType("astrbot.core.agent.tool")
+        tool_mod.ToolSet = _FakeToolSet
+        ws_mod = types.ModuleType("astrbot.core.tools.web_search_tools")
+        ws_mod.normalize_legacy_web_search_config = lambda cfg: None
+        ws_mod.TavilyWebSearchTool = _FakeTool
+        ws_mod.__getattr__ = lambda name: type(name, (), {})
+        monkeypatch.setitem(sys.modules, "astrbot.core.agent.tool", tool_mod)
+        monkeypatch.setitem(sys.modules, "astrbot.core.tools", types.ModuleType("astrbot.core.tools"))
+        monkeypatch.setitem(sys.modules, "astrbot.core.tools.web_search_tools", ws_mod)
+
+        assert plugin._story_web_search("other_bot") is None
+        bundle = plugin._story_web_search("Inwind_NapCat")
+        assert bundle is not None
+        assert await bundle.run("web_search", {"query": "天气"}) == "searched:天气"
+        assert seen_tool_umos == [other_umo]
+    finally:
+        await plugin.terminate()
+
+
 # --------------------------------------------------------------------- 命令到记忆的整条链
 async def test_story_command_flow_and_chat_injection(plugin_main):
     plugin, context = await make_plugin(
@@ -283,6 +389,13 @@ async def test_story_command_flow_and_chat_injection(plugin_main):
         tail = req.system_prompt.split("# 我自己这边\n")[1]
         assert tail.startswith("- 我现在在便利店，正在躲雨，大概到")
         assert "不当成已经发生的来说" in tail
+
+        # 聊天请求里：规则在人格前，状态卡在整段系统提示的最后
+        req = SimpleNamespace(system_prompt="已有的系统提示词")
+        await plugin.on_llm_request(private_event("在干嘛"), req)
+        text = req.system_prompt
+        assert text.index("# 我这会儿") < text.index("# 关于我的记忆") < text.index("# 我自己这边")
+        assert text.index("必须调用 say") < text.index("# 关于我的记忆")
 
         assert (await run_command(plugin, "/story pause"))[0].startswith("故事暂停了")
         assert "已暂停（手动暂停）" in (await run_command(plugin, "/story status"))[0]
@@ -353,5 +466,66 @@ async def test_story_web_routes(plugin_main):
 
         request.username = None
         assert (await plugin.web_story())["status"] == 401
+    finally:
+        await plugin.terminate()
+
+
+async def test_aiocqhttp_offline_warning_and_empty_exception_send_log(plugin_main, caplog):
+    plugin, context = await make_plugin(
+        plugin_main, {"story": {"enabled": True, "base_card": "她叫映风。"}}
+    )
+    _, request = plugin_main
+    try:
+        cq_bot = SimpleNamespace(_wsr_api_clients={}, _wsr_event_clients=set())
+        inst = SimpleNamespace(
+            meta=lambda: SimpleNamespace(id="Inwind_NapCat", name="aiocqhttp"),
+            status="running",
+            bot=cq_bot,
+        )
+        context.platform_manager = SimpleNamespace(get_insts=lambda: [inst])
+
+        assert "反向 WebSocket 尚未连接" in plugin._platform_issue("Inwind_NapCat")
+        assert "未启用或未加载" in plugin._platform_issue("other_bot")
+        cq_bot._wsr_event_clients = {"event_ws"}
+        assert "/ws/event" in plugin._platform_issue("Inwind_NapCat")
+        cq_bot._wsr_event_clients = set()
+
+        # WebUI 导入种子与开启故事不受阻拦，但卡片透出 platform_warning，手动唤醒给出原因
+        request.payload = {"bot": "Inwind_NapCat", "payload": SEED}
+        async def body():
+            return json.dumps(request.payload, ensure_ascii=False).encode("utf-8")
+        request.body = body
+        await plugin.web_import()
+
+        request.payload = {"bot": "Inwind_NapCat", "action": "on"}
+        opened = await plugin.web_story_action()
+        assert opened["enabled"] is True
+        assert "反向 WebSocket 尚未连接" in opened["platform_warning"]
+
+        request.payload = {"bot": "Inwind_NapCat", "action": "wake"}
+        rejected = await plugin.web_story_action()
+        assert "反向 WebSocket 尚未连接" in rejected["error"]
+
+        # 无参 ApiNotAvailable() 抛出时，_send_to 日志不再变成空串
+        ApiNotAvailable = type("ApiNotAvailable", (Exception,), {})
+
+        async def fail_send(umo, chain):
+            raise ApiNotAvailable()
+
+        context.send_message = fail_send
+        with caplog.at_level(logging.WARNING):
+            ok = await plugin._send_to("Inwind_NapCat:FriendMessage:10001", "在吗")
+        assert ok is False
+        messages = "\n".join(record.getMessage() for record in caplog.records)
+        assert "Inwind_NapCat:FriendMessage:10001" in messages
+        assert "ApiNotAvailable" in messages
+        assert "反向 WebSocket 尚未连接" in messages
+
+        # 连上反向 WS 后，状态告警清除
+        cq_bot._wsr_api_clients["123456"] = object()
+        assert plugin._platform_issue("Inwind_NapCat") == ""
+        overview = await plugin.web_story()
+        row = next(item for item in overview["bots"] if item["bot_id"] == "Inwind_NapCat")
+        assert row["platform_warning"] == ""
     finally:
         await plugin.terminate()

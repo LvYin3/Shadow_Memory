@@ -195,7 +195,14 @@ class TransferService:
         if mode == "replace" and confirm_target != target:
             raise TransferError("覆盖模式必须手动输入目标 bot_id")
         data = await self._source(source)
-        if not any(data[cat] for cat in cats if cat != "media") and "media" not in cats:
+        from ..story import carry
+
+        story = await carry.export_world(self.db, source) if mode == "replace" else None
+        if (
+            not any(data[cat] for cat in cats if cat != "media")
+            and "media" not in cats
+            and not carry.has_world(story)
+        ):
             raise TransferError("源机器人没有可转移的内容")
 
         media_plan: dict[str, Any] | None = None
@@ -314,6 +321,16 @@ class TransferService:
                             ),
                         )
                         counts["notes"] += 1
+
+                if mode == "replace":
+                    await carry.replace_world(
+                        self.db,
+                        target,
+                        story,
+                        source=source,
+                        event_id_map=id_map,
+                        now=stamps,
+                    )
 
                 if media_plan is not None:
                     for row in media_plan["rows"]:

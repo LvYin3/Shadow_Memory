@@ -27,6 +27,11 @@ async def test_fresh_database_sets_schema_version(workdir):
         "story_scenes",
         "story_canon",
         "story_notes",
+        "story_intents",
+        "story_remotes",
+        "story_unreads",
+        "story_sends",
+        "story_npcs",
     } <= names
     await db.close()
 

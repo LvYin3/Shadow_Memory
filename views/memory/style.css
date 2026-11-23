@@ -104,7 +104,8 @@ h3 {
 }
 
 .panel#panel-settings,
-.panel#panel-story {
+.panel#panel-story,
+.panel#panel-config {
   display: block;
 }
 
@@ -144,6 +145,22 @@ h3 {
   padding-left: 18px;
 }
 
+.story-spoiler {
+  margin-top: 12px;
+}
+.story-spoiler label,
+.entry-row,
+.hook-row,
+.note-row {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+.entry-row,
+.hook-row,
+.note-row {
+  grid-template-columns: 1fr auto;
+}
 .story-card li {
   margin: 3px 0;
 }
@@ -390,4 +407,87 @@ dialog::backdrop {
 .toast.error {
   background: var(--danger);
   color: #fff;
+}
+
+.config-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+button.config-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+button.config-card:hover {
+  border-color: var(--accent);
+}
+
+.config-card-title {
+  font-weight: 600;
+}
+
+.config-back {
+  margin-bottom: 12px;
+}
+
+.config-block {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+
+.config-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.config-fields .hint,
+.config-fields .note {
+  font-size: 12px;
+}
+
+.config-fields .note {
+  color: var(--warn);
+}
+
+.config-block h4 {
+  margin: 12px 0 8px;
+  font-size: 13px;
+}
+
+.tts-row,
+.bot-pick {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.tts-row input,
+.tts-row select,
+.bot-pick select,
+.bot-pick input {
+  flex: 1;
+}
+
+details.advanced {
+  margin-top: 8px;
+}
+
+details.advanced summary {
+  cursor: pointer;
+  color: var(--muted);
+  margin-bottom: 8px;
 }

@@ -39,7 +39,7 @@ def say_example_messages(call_id: str = "shadow_memory_say_demo") -> list[dict]:
     ]
 
 
-def build_environment_prompt(
+def environment_parts(
     *,
     platform: str,
     chat_type: str,
@@ -50,14 +50,14 @@ def build_environment_prompt(
     enabled: bool = True,
     compact: bool = False,
     life_lines: list[str] | None = None,
-) -> str:
-    """生成第一人称环境块；只说明场景与 say，不规定该场景下的动作。
+) -> tuple[str, str]:
+    """拆成（稳定规则, 状态卡）。
 
-    ``life_lines`` 是故事模块给的状态卡（她此刻在哪、在做什么）。它一天会变很多次，
-    所以放在整块的最后，前面不变的部分仍能命中提示词缓存。
+    单独拼回去时，状态卡仍在这块的末尾。聊天注入会把规则放在会变的人格前面，
+    状态卡放到整段系统提示的最后。
     """
     if not enabled:
-        return ""
+        return "", ""
     life = [line for line in (life_lines or []) if line and line.strip()]
     life_block = "\n".join(["# 我自己这边", *life]) if life else ""
     chat_type = (chat_type or "other").lower()
@@ -78,13 +78,41 @@ def build_environment_prompt(
     if compact:
         lines.append("- 我说文字消息必须调用 say 函数；比如对方说“在吗”，我就调 say(text=\"在吗\")。")
         lines.append("- say/speak 的 text 只放正文，不要输出 <text> 或任何 XML/HTML 标签。")
-        if life_block:
-            lines.extend(["", life_block])
-        return "\n".join(lines)
+    else:
+        body = (rules or "").strip() or DEFAULT_RULES
+        lines.append("")
+        lines.append(body)
+    return "\n".join(lines), life_block
 
-    body = (rules or "").strip() or DEFAULT_RULES
-    lines.append("")
-    lines.append(body)
-    if life_block:
-        lines.extend(["", life_block])
-    return "\n".join(lines)
+
+def build_environment_prompt(
+    *,
+    platform: str,
+    chat_type: str,
+    group_name: str = "",
+    group_id: str = "",
+    sender_name: str = "",
+    rules: str = "",
+    enabled: bool = True,
+    compact: bool = False,
+    life_lines: list[str] | None = None,
+) -> str:
+    """生成第一人称环境块；只说明场景与 say，不规定该场景下的动作。
+
+    ``life_lines`` 是故事模块给的状态卡（她此刻在哪、在做什么）。它一天会变很多次，
+    所以放在整块的最后，前面不变的部分仍能命中提示词缓存。
+    """
+    rules_block, life_block = environment_parts(
+        platform=platform,
+        chat_type=chat_type,
+        group_name=group_name,
+        group_id=group_id,
+        sender_name=sender_name,
+        rules=rules,
+        enabled=enabled,
+        compact=compact,
+        life_lines=life_lines,
+    )
+    if rules_block and life_block:
+        return f"{rules_block}\n\n{life_block}"
+    return rules_block or life_block

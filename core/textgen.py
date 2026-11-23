@@ -70,6 +70,12 @@ class TextClient:
             return text
         return await self._via_direct(system, user, task)
 
+    async def complete(self, system: str, user: str, *, thinking: str) -> str | None:
+        """直连写作模型，并强制这次开或关思考。没有直连地址时返回 None。"""
+        if thinking not in {"enabled", "disabled"}:
+            thinking = "disabled"
+        return await self._via_direct(system, user, thinking=thinking)
+
     async def generate_json(
         self,
         system: str,
@@ -262,7 +268,9 @@ class TextClient:
             return None
         return str(text)
 
-    async def _via_direct(self, system: str, user: str, task: str = "") -> str | None:
+    async def _via_direct(
+        self, system: str, user: str, task: str = "", *, thinking: str | None = None
+    ) -> str | None:
         if not self.base_url:
             return None
         url = chat_url(self.base_url)
@@ -278,14 +286,18 @@ class TextClient:
                 {"role": "user", "content": user},
             ],
         }
-        mode, effort = thinking_policy(self.config, task)
+        if thinking in {"enabled", "disabled"}:
+            mode, effort = thinking, ""
+        else:
+            mode, effort = thinking_policy(self.config, task)
         if mode == "enabled":
             payload["thinking"] = {"type": "enabled"}
             if effort:
                 payload["reasoning_effort"] = effort
         elif mode == "disabled":
             payload["thinking"] = {"type": "disabled"}
-        result = await self.http.post_json(url, payload, headers, timeout_s=60.0)
+        timeout = 180.0 if mode == "enabled" else 60.0
+        result = await self.http.post_json(url, payload, headers, timeout_s=timeout)
         if not result.ok and result.status in (400, 422) and (
             "thinking" in payload or "reasoning_effort" in payload
         ):

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from astrbot_plugin_shadow_memory.memory import prompts as memory_prompts
 from astrbot_plugin_shadow_memory.story import prompts
-from astrbot_plugin_shadow_memory.story.director import SceneFailed
+from astrbot_plugin_shadow_memory.story.cast import CastTools
+from astrbot_plugin_shadow_memory.story.director import SceneFailed, SceneProgress
 from astrbot_plugin_shadow_memory.story.llm import StoryLLM, StoryLLMError
 from astrbot_plugin_shadow_memory.story.store import story_umo
 
@@ -36,6 +38,11 @@ from .story_helpers import (
 @pytest.fixture
 def env(db, make_configs):
     return build_story(db, make_configs(STORY_ON))
+
+
+def with_name_guard(db, make_configs):
+    """真名拦截默认关；要测拦截本身时显式打开。"""
+    return build_story(db, make_configs({"story": {"enabled": True, "guard_real_names": True}}))
 
 
 async def story_events(db):
@@ -82,8 +89,11 @@ async def test_scene_commits_memory_card_canon_notes_and_schedule(env):
         ("play", "便利店老板"),
     ]
     assert canon[-1]["category"] == "person" and canon[-1]["scene_id"] == scene["id"]
-    notes = await env.store.notes(BOT)
-    assert [(note["title"], note["body"]) for note in notes] == [("暗线", "室友阿澄在瞒着她找工作")]
+    assert await env.store.notes(BOT) == []
+    stored = json.loads((await env.store.state(BOT))["tree"])
+    assert stored["threads"][0]["title"] == "暗线"
+    assert stored["threads"][0]["people"] == ["阿澄"]
+    assert stored["threads"][0]["scenes"] == [scene["id"]]
 
     state = await env.store.state(BOT)
     card = json.loads(state["card"])
@@ -232,8 +242,9 @@ FAKE_MESSAGE = "你的手机弹出一条消息，是小明：「睡了没」。"
     ],
     ids=["opening", "narration", "check-branch", "epilogue"],
 )
-async def test_background_model_cannot_speak_for_real_people(env, script):
+async def test_background_model_cannot_speak_for_real_people(db, make_configs, script):
     """背景模型写“某某发来消息”会让她记住一段现实里没发生过的对话，必须拦下。"""
+    env = with_name_guard(db, make_configs)
     await chat_with(env.db)
     await start_story(env)
     script_scene(env, **script)
@@ -242,7 +253,17 @@ async def test_background_model_cannot_speak_for_real_people(env, script):
     assert await story_events(env.db) == []
 
 
-async def test_real_people_may_appear_in_private_notes_but_not_in_canon(env):
+async def test_real_names_pass_when_the_guard_is_off(env):
+    """默认不拦真名：叙述里出现小明也能演完。"""
+    await chat_with(env.db)
+    await start_story(env)
+    script_scene(env, opening={**OPENING, "narration": FAKE_MESSAGE})
+    result = await env.director.run(BOT)
+    assert result.rounds == 1
+
+
+async def test_real_people_may_appear_in_private_notes_but_not_in_canon(db, make_configs):
+    env = with_name_guard(db, make_configs)
     await chat_with(env.db)
     await start_story(env)
     script_scene(
@@ -255,16 +276,24 @@ async def test_real_people_may_appear_in_private_notes_but_not_in_canon(env):
                 {"name": "便利店老板", "category": "人物", "body": "姓周，话少。"},
             ],
             "notes": [{"title": "寄来的茶", "body": "小明说寄了茶，还没到，也没给单号。"}],
+            "tree": {
+                "threads": [
+                    {"title": "寄来的茶", "people": ["小明"], "canon": [], "seed": [], "scenes": []}
+                ]
+            },
         },
     )
     await env.director.run(BOT)
     assert [row["name"] for row in await env.store.canon(BOT) if row["origin"] == "play"] == [
         "便利店老板"
     ]
-    assert (await env.store.notes(BOT))[0]["body"] == "小明说寄了茶，还没到，也没给单号。"
+    assert await env.store.notes(BOT) == []
+    stored = json.loads((await env.store.state(BOT))["tree"])
+    assert stored["threads"][0]["people"] == []
 
 
-async def test_aliases_are_guarded_too(env):
+async def test_aliases_are_guarded_too(db, make_configs):
+    env = with_name_guard(db, make_configs)
     await chat_with(env.db, fragment="明明说给我寄了一盒茶")
     await start_story(env)
     script_scene(env, opening={**OPENING, "narration": "明明发来一张雪景照片。"})
@@ -442,9 +471,9 @@ async def test_short_gap_needs_no_backfill(env):
 
 # --------------------------------------------------------------------- 预约与状态卡
 @pytest.mark.parametrize(
-    ("asked", "minutes"), [(1, 10), (45, 45), (99999, 720), (None, 720), ("abc", 720)]
+    ("asked", "minutes"), [(0, 0), (1, 1), (45, 45), (99999, 99999)]
 )
-async def test_next_wake_is_clamped(env, asked, minutes):
+async def test_next_wake_is_not_clamped_by_default(env, asked, minutes):
     await start_story(env)
     script_scene(env, closing={**CLOSING, "next_wake_minutes": asked})
     result = await env.director.run(BOT)
@@ -473,7 +502,7 @@ async def test_canon_is_append_only_and_notes_can_be_rewritten(env):
                 {"name": "便利店老板", "category": "人物", "body": "姓周，话少。"},
                 {"name": "青屿大学", "category": "地点", "body": "其实在山里。"},
             ],
-            "notes": [{"title": "暗线", "body": ""}, {"title": "伏笔", "body": "那把伞是别人落下的"}],
+            "tree": {"threads": [{"title": "伏笔", "people": [], "canon": [], "seed": [], "scenes": []}]},
         },
     )
     await env.director.run(BOT)
@@ -484,7 +513,8 @@ async def test_canon_is_append_only_and_notes_can_be_rewritten(env):
         ("play", "便利店老板", "姓周，话少。"),  # 重复登记不会多出一条
         ("play", "青屿大学", "其实在山里。"),
     ]
-    assert [note["title"] for note in await env.store.notes(BOT)] == ["伏笔"]
+    assert await env.store.notes(BOT) == []
+    assert json.loads((await env.store.state(BOT))["tree"])["threads"][0]["title"] == "伏笔"
 
 
 async def test_notes_and_scene_summaries_reach_the_next_scene(env):
@@ -495,9 +525,10 @@ async def test_notes_and_scene_summaries_reach_the_next_scene(env):
     script_scene(env)
     await env.director.run(BOT)
     opening_prompt = env.llm.prompts("gm")[3]
-    assert "## 暗线\n室友阿澄在瞒着她找工作" in opening_prompt
-    assert "她在便利店躲雨，买到最后一把伞。" in opening_prompt
-    assert "[人物] 便利店老板：姓周，话少。" in opening_prompt
+    assert "她是青屿大学的大三学生" in opening_prompt
+    assert "## 暗线" in opening_prompt
+    assert "室友阿澄在瞒着她找工作" not in opening_prompt
+    assert "姓周，话少" not in opening_prompt
     assert "地点：便利店；在做：躲雨" in opening_prompt
     # 上一场的结尾原样带上，好让新的一场接着写；但仍然只有她外显的言行
     assert (
@@ -555,7 +586,7 @@ async def test_commit_is_atomic(env, monkeypatch):
     async def boom(*args, **kwargs):
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(env.store, "apply_notes", boom)
+    monkeypatch.setattr(env.store, "update_state", boom)
     with pytest.raises(RuntimeError):
         await env.director.run(BOT)
     assert await env.db.scalar("SELECT COUNT(*) FROM events") == 0
@@ -677,3 +708,566 @@ async def test_llm_without_provider(env):
     assert await llm.available("gm", BOT) is False
     with pytest.raises(StoryLLMError, match="背景模型"):
         await llm.ask_json("gm", BOT, "s", "u")
+
+
+def _gm_thinking(env) -> list[bool]:
+    return [
+        flag
+        for (role, _, _), flag in zip(env.llm.calls, env.llm.thinking)
+        if role == "gm"
+    ]
+
+
+async def test_only_the_closing_call_asks_for_thinking(env):
+    await start_story(env)
+    script_scene(env)
+    await env.director.run(BOT)
+    assert _gm_thinking(env) == [False, False, True]
+
+
+async def test_thinking_off_never_asks(db, make_configs):
+    env = build_story(db, make_configs({"story": {"enabled": True, "thinking": "off"}}))
+    await start_story(env)
+    script_scene(env)
+    await env.director.run(BOT)
+    assert _gm_thinking(env) == [False, False, False]
+
+
+async def test_scene_thinking_turns_on_only_when_something_is_unfinished(db, make_configs):
+    env = build_story(db, make_configs({"story": {"enabled": True, "thinking": "scene"}}))
+    await start_story(env)
+    env.llm.push("gm", {"think": True, "why": "燃气费没交"})
+    script_scene(env)
+    await env.director.run(BOT)
+    assert _gm_thinking(env) == [False, True, True, True]
+
+
+async def test_scene_thinking_stays_off_when_nothing_is_unfinished(db, make_configs):
+    env = build_story(db, make_configs({"story": {"enabled": True, "thinking": "scene"}}))
+    await start_story(env)
+    env.llm.push("gm", {"think": False, "why": "第一场"})
+    script_scene(env)
+    await env.director.run(BOT)
+    assert _gm_thinking(env) == [False, False, False, False]
+
+
+async def test_plan_puts_constraints_in_context_and_does_not_think_while_playing(db, make_configs):
+    env = build_story(db, make_configs({"story": {"enabled": True, "thinking": "plan"}}))
+    await start_story(env)
+    env.llm.push("gm", {"think": True, "why": "燃气费没交"})
+    env.llm.push(
+        "gm",
+        {"established": "住在合租屋", "unresolved": "燃气费没交", "consequences": "去交或再拖"},
+    )
+    script_scene(env)
+    await env.director.run(BOT)
+    # 判断和规划都不在执行时开思考；规划那一次本身要思考
+    assert _gm_thinking(env) == [False, True, False, False, False]
+    opening = env.llm.prompts("gm")[2]
+    assert "# 这场的约束（她看不到）" in opening
+    assert "燃气费没交" in opening
+    assert "这场的约束" not in "\n".join(note["body"] for note in await env.store.notes(BOT))
+
+
+async def test_thinking_uses_the_direct_model_and_skips_without_one(env):
+    provider = FakeProvider(['{"narration": "好"}'])
+    seen: list[tuple[str, str]] = []
+
+    async def direct(system, user):
+        seen.append((system, user))
+        return '{"narration": "想过了"}'
+
+    llm = StoryLLM(
+        lambda role, bot_id: _provider(provider), env.stack.audit, direct=direct
+    )
+    value, _ = await llm.ask_json("gm", BOT, "系统", "用户", thinking=True)
+    assert value == {"narration": "想过了"} and seen == [("系统", "用户")]
+    assert provider.requests == []
+
+    skipped = StoryLLM(lambda role, bot_id: _provider(provider), env.stack.audit)
+    value, _ = await skipped.ask_json("gm", BOT, "系统", "用户", thinking=True)
+    assert value == {"narration": "好"} and len(provider.requests) == 1
+
+
+async def _provider(provider):
+    return provider
+
+
+# --------------------------------------------------------------------- 与聊天连通
+async def _session(env, name="小明", umo="umo1", kind="private"):
+    await env.db.execute(
+        "INSERT INTO sessions(bot_id, umo, name, type, last_message_at) VALUES(?,?,?,?,?)",
+        (BOT, umo, name, kind, env.clock.now),
+    )
+
+
+def _queue_scene(env, *, actions, turns, opening=None, closing=None):
+    env.llm.push("gm", dict(opening or OPENING))
+    for action, turn in zip(actions, turns, strict=True):
+        env.llm.push("actor", dict(action))
+        env.llm.push("gm", dict(turn))
+    env.llm.push("gm", dict(closing or CLOSING))
+    env.stack.text.push(dict(MEMORY))
+
+
+async def test_display_name_miss_then_one_retry_with_the_session_id(env):
+    await start_story(env)
+    await _session(env)
+    _queue_scene(
+        env,
+        actions=[
+            {**ACTION, "messages": [{"to": "不存在的人", "text": "在吗"}]},
+            {**ACTION, "messages": [{"to": "umo1", "text": "在吗"}]},
+        ],
+        turns=[{**PLAIN_TURN, "end": False}, {**PLAIN_TURN, "end": True}],
+    )
+    sent: list[tuple[str, str]] = []
+
+    async def send(umo, text):
+        sent.append((umo, text))
+        return True
+
+    env.director.send_text = send
+    result = await env.director.run(BOT)
+    assert sent == [("umo1", "在吗")]
+    assert result.rounds == 2
+    assert "没有这个人" in env.llm.prompts("actor")[1]
+    state = await env.store.state(BOT)
+    assert state["share_tokens"] == pytest.approx(19)
+
+
+async def test_report_does_not_spend_the_share_bucket(env):
+    await start_story(env)
+    await _session(env)
+    await env.store.add_intent(BOT, "umo1", "小明", "去问燃气费", env.clock.now)
+    _queue_scene(
+        env,
+        actions=[dict(ACTION), {**ACTION, "messages": [{"to": "小明", "text": "问过了"}]}],
+        turns=[
+            {**PLAIN_TURN, "settled": [1], "end": False},
+            {**PLAIN_TURN, "end": True},
+        ],
+    )
+
+    async def send(umo, text):
+        return True
+
+    env.director.send_text = send
+    await env.director.run(BOT)
+    state = await env.store.state(BOT)
+    assert state["share_tokens"] == pytest.approx(20)
+    row = await env.db.fetchone("SELECT kind FROM story_sends")
+    assert row["kind"] == "report"
+    chat = await env.db.fetchone(
+        "SELECT source, status FROM events WHERE umo='umo1' AND source='chat' ORDER BY id DESC"
+    )
+    assert chat["status"] == "closed"
+
+
+async def test_unread_keeps_only_the_latest(env):
+    await start_story(env)
+    await env.service.note_unread(BOT, "umo1", "小明", "第一句")
+    await env.service.note_unread(BOT, "umo2", "小红", "第二句")
+    rows = await env.store.unreads(BOT)
+    assert [row["text"] for row in rows] == ["第二句"]
+
+
+async def test_remote_name_is_allowed_until_the_close_marks_it(db, make_configs):
+    env = with_name_guard(db, make_configs)
+    await start_story(env)
+    await chat_with(env.db)
+    await env.store.add_remote(BOT, "umo1", "小明", "parcel", "我给你寄了茶", env.clock.now)
+    script_scene(env, opening={**OPENING, "narration": "门口放着一盒茶，是小明寄来的。"})
+    result = await env.director.run(BOT)
+    assert result.rounds == 1
+    assert len(await env.store.open_remotes(BOT)) == 1
+
+    script_scene(
+        env,
+        opening={**OPENING, "narration": "茶还在门口。"},
+        closing={**CLOSING, "remote": [{"id": 1, "outcome": "到了"}]},
+    )
+    await env.director.run(BOT)
+    assert await env.store.open_remotes(BOT) == []
+
+
+async def test_quoted_speech_is_still_blocked_when_the_name_is_allowed(db, make_configs):
+    env = with_name_guard(db, make_configs)
+    await start_story(env)
+    await chat_with(env.db)
+    await env.store.add_remote(BOT, "umo1", "小明", "parcel", "我给你寄了茶", env.clock.now)
+    script_scene(env, opening={**OPENING, "narration": "手机亮了，小明：「睡了没」。"})
+    with pytest.raises(SceneFailed, match="原话"):
+        await env.director.run(BOT)
+
+
+async def test_omitted_wake_asks_once_then_stays_asleep(env):
+    await start_story(env)
+    closing = {key: value for key, value in CLOSING.items() if key != "next_wake_minutes"}
+    script_scene(env, closing=closing)
+    env.llm.push("gm", {"summary": "还是没写"})
+    result = await env.director.run(BOT)
+    assert result.next_wake_at == 0
+    state = await env.store.state(BOT)
+    assert state["next_wake_at"] is None
+
+
+async def test_omitted_wake_accepts_the_follow_up(env):
+    await start_story(env)
+    closing = {key: value for key, value in CLOSING.items() if key != "next_wake_minutes"}
+    script_scene(env, closing=closing)
+    env.llm.push("gm", {"next_wake_minutes": 15})
+    result = await env.director.run(BOT)
+    assert result.next_wake_at == env.clock.now + 15 * MINUTE
+
+
+async def test_early_wake_moves_the_appointment_without_spending_a_token(env):
+    await start_story(env)
+    before = await env.store.state(BOT)
+    later = env.clock.now + 5 * 60 * MINUTE
+    await env.store.update_state(BOT, env.clock.now, next_wake_at=later)
+    text = await env.service.propose(BOT, "umo1", "小明", "去问燃气费", wake_now=True)
+    assert text == "我现在就去。"
+    state = await env.store.state(BOT)
+    assert state["next_wake_at"] == env.clock.now
+    assert state["tokens"] == before["tokens"]
+    assert (await env.store.open_intents(BOT))[0]["body"] == "去问燃气费"
+
+
+async def test_early_wake_without_tokens_only_queues(env):
+    await start_story(env)
+    await env.store.update_state(BOT, env.clock.now, tokens=0, tokens_at=env.clock.now)
+    later = env.clock.now + 30 * MINUTE
+    await env.store.update_state(BOT, env.clock.now, next_wake_at=later)
+    text = await env.service.propose(BOT, "umo1", "小明", "去问", wake_now=True)
+    assert "走不开" in text
+    state = await env.store.state(BOT)
+    assert state["next_wake_at"] == later
+    assert state["tokens"] == 0
+
+
+async def test_seen_message_records_only_a_clear_remote(env):
+    await start_story(env)
+    env.stack.jev.ask_value = {
+        "parcel": {"noul": 0.2},
+        "food": {"noul": 0.1},
+        "money": {"noul": 0.95},
+    }
+    await env.service.note_seen_message(BOT, "umo1", "小明", "钱转你了")
+    rows = await env.store.open_remotes(BOT)
+    assert rows[0]["kind"] == "money"
+    env.stack.jev.ask_value = None
+    env.stack.jev.noul_value = None
+    await env.service.note_seen_message(BOT, "umo1", "小明", "在吗")
+    assert len(await env.store.open_remotes(BOT)) == 1
+
+
+# --------------------------------------------------------------------- 网页搜索
+SNIPPET = "气象台发布青屿暴雨橙色预警，链接 https://example.test/rain"
+
+
+class ToolProvider:
+    def __init__(self, outputs):
+        self.outputs = list(outputs)
+        self.requests = []
+
+    async def text_chat(self, **kwargs):
+        self.requests.append(kwargs)
+        value = self.outputs.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+
+def tool_call(query: str = "青屿天气"):
+    return SimpleNamespace(
+        completion_text="",
+        tools_call_name=["web_search"],
+        tools_call_args=[{"query": query}],
+        tools_call_ids=["call-1"],
+    )
+
+
+def chat_text(text: str):
+    return SimpleNamespace(completion_text=text, tools_call_name=None)
+
+
+class FakeSearch:
+    def __init__(self, result):
+        self.result = result
+        self.calls: list[tuple[str, dict]] = []
+        self.func_tool = object()
+        self.packed: list[list[str]] = []
+
+    async def run(self, name, arguments):
+        self.calls.append((name, arguments))
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+    def pack(self, response, contents):
+        self.packed.append(list(contents))
+        return {"contents": list(contents)}
+
+
+def _llm(provider, audit, direct=None):
+    async def resolver(role, bot_id):
+        return provider
+
+    return StoryLLM(resolver, audit, direct=direct)
+
+
+def test_gm_prompt_asks_for_perceivable_search_results():
+    text = prompts.gm_system()
+    assert "天气" in text and "当地事件" in text
+    assert "我搜索了" in text and "不要编造" in text
+
+
+async def test_search_once_then_json_and_the_snippet_stays_out_of_the_transcript(db, make_configs):
+    env = build_story(db, make_configs(STORY_ON))
+    provider = ToolProvider(
+        [
+            tool_call(),
+            chat_text(json.dumps({**OPENING, "narration": "窗外在下雨。"}, ensure_ascii=False)),
+            chat_text(json.dumps(ACTION, ensure_ascii=False)),
+            chat_text(json.dumps(PLAIN_TURN, ensure_ascii=False)),
+            chat_text(json.dumps(CLOSING, ensure_ascii=False)),
+        ]
+    )
+    search = FakeSearch(SNIPPET)
+    seen_bots: list[str] = []
+    env.director.llm = _llm(provider, env.stack.audit)
+    env.director._search_tools = lambda bot_id: (seen_bots.append(bot_id), search)[1]
+    env.stack.text.push(dict(MEMORY))
+    await start_story(env)
+    result = await env.director.run(BOT)
+    assert result.rounds == 1
+    assert seen_bots == [BOT]
+    assert search.calls == [("web_search", {"query": "青屿天气"})]
+    assert SNIPPET[:20] in search.packed[0][0]
+    stored = await env.db.fetchall("SELECT text FROM event_turns")
+    blob = "\n".join(row["text"] for row in stored)
+    events = await env.db.fetchall("SELECT fragment, summary FROM events WHERE source='story'")
+    blob += "\n" + "\n".join((row["fragment"] or "") + (row["summary"] or "") for row in events)
+    assert "气象台" not in blob
+    assert "example.test" not in blob
+
+
+async def test_search_failure_still_finishes_the_scene(db, make_configs):
+    env = build_story(db, make_configs(STORY_ON))
+    provider = ToolProvider(
+        [
+            tool_call(),
+            chat_text(json.dumps(OPENING, ensure_ascii=False)),
+            chat_text(json.dumps(ACTION, ensure_ascii=False)),
+            chat_text(json.dumps(PLAIN_TURN, ensure_ascii=False)),
+            chat_text(json.dumps(CLOSING, ensure_ascii=False)),
+        ]
+    )
+    search = FakeSearch(RuntimeError("搜索挂了"))
+    env.director.llm = _llm(provider, env.stack.audit)
+    env.director._search_tools = lambda: search
+    env.stack.text.push(dict(MEMORY))
+    await start_story(env)
+    result = await env.director.run(BOT)
+    assert result.rounds == 1
+    assert search.calls and search.packed[0] == ["没搜到"]
+
+
+async def test_tool_results_are_clipped_before_they_return(env):
+    provider = ToolProvider([tool_call(), chat_text('{"narration": "好"}')])
+    search = FakeSearch("雨" * 2000)
+    await _llm(provider, env.stack.audit).ask_json("gm", BOT, "系统", "用户", search=search)
+    assert len(search.packed[0][0]) == 1501
+    assert search.packed[0][0].endswith("…")
+
+
+async def test_third_tool_round_is_not_executed(env):
+    provider = ToolProvider([tool_call(), tool_call(), chat_text('{"narration": "好"}')])
+    search = FakeSearch("第一页")
+    value, _attempts = await _llm(provider, env.stack.audit).ask_json(
+        "gm", BOT, "系统", "用户", search=search
+    )
+    assert value == {"narration": "好"}
+    assert len(search.calls) == 2
+    assert "func_tool" not in provider.requests[2]
+    assert "没搜到" in provider.requests[2]["prompt"]
+
+
+async def test_close_hands_search_notes_to_the_direct_model(env):
+    provider = ToolProvider(
+        [tool_call(), chat_text('{"narration": "不该采用这段"}')]
+    )
+    search = FakeSearch(SNIPPET)
+    seen: list[str] = []
+
+    async def direct(system, user):
+        seen.append(user)
+        return '{"narration": "窗外在下雨。"}'
+
+    value, _attempts = await _llm(provider, env.stack.audit, direct=direct).ask_json(
+        "gm", BOT, "系统", "用户", search=search, thinking=True, tools_then_think=True
+    )
+    assert value == {"narration": "窗外在下雨。"}
+    assert SNIPPET in seen[0]
+    assert len(search.calls) == 1
+
+
+def _line(seed: str) -> str:
+    text = seed + "我会先把眼前这件事从头看到尾，再决定要不要插手，不喜欢被人催着马上表态一下。"
+    assert 40 <= len(text) <= 90, len(text)
+    return text
+
+
+def _promote_args(name: str = "阿澄") -> dict:
+    return {
+        "name": name,
+        "relationship": "她的室友，一起合租。",
+        "core": _line("平常"),
+        "edge": _line("被问到"),
+        "tension": _line("夜里"),
+    }
+
+
+def test_bad_persona_is_not_nominated():
+    progress = SceneProgress(started_at=NOW, cause="manual")
+    tools = CastTools(progress, [], cap=3)
+    text = tools.promote({"name": "阿澄", "relationship": "室友", "core": "太短"})
+    assert "没有写成" in text
+    assert progress.nominations == []
+
+
+def test_promotion_over_cap_is_refused():
+    progress = SceneProgress(started_at=NOW, cause="manual")
+    roster = [{"name": "甲", "status": "active"}, {"name": "乙", "status": "active"}, {"name": "丙", "status": "active"}]
+    tools = CastTools(progress, roster, cap=3)
+    text = tools.promote(_promote_args("丁"))
+    assert "空位已满" in text
+    assert progress.nominations == []
+
+
+async def test_nomination_is_created_only_when_the_scene_commits(env):
+    progress = SceneProgress(started_at=env.clock.now, cause="manual")
+    tools = CastTools(progress, [], cap=3)
+    assert "记下了" in tools.promote(_promote_args())
+    assert await env.store.npcs(BOT) == []
+    await env.director._finish_nominations(BOT, progress, env.clock.now, 3)
+    rows = await env.store.npcs(BOT)
+    assert rows[0]["name"] == "阿澄" and rows[0]["status"] == "active"
+    fact = await env.db.fetchone("SELECT text FROM facts WHERE bot_id=?", (rows[0]["npc_bot_id"],))
+    assert fact["text"] == "她的室友，一起合租。"
+
+
+async def test_a_failed_scene_does_not_create_the_nominee(env):
+    await start_story(env)
+    spoken = json.dumps({**PLAIN_TURN, "narration": SPOKEN}, ensure_ascii=False)
+    provider = ToolProvider(
+        [
+            SimpleNamespace(
+                completion_text="",
+                tools_call_name=["promote_npc"],
+                tools_call_args=[_promote_args()],
+                tools_call_ids=["p1"],
+            ),
+            chat_text(json.dumps(OPENING, ensure_ascii=False)),
+            chat_text(json.dumps(ACTION, ensure_ascii=False)),
+            chat_text(spoken),
+            chat_text(spoken),
+        ]
+    )
+    env.director.llm = _llm(provider, env.stack.audit)
+    with pytest.raises(SceneFailed):
+        await env.director.run(BOT)
+    assert await env.store.npcs(BOT) == []
+
+
+async def test_present_npc_acts_every_round_and_inner_stays_out(env):
+    await start_story(env)
+    await env.store.insert_npc(BOT, "npc:bot1:1", "阿澄", "室友", env.clock.now)
+    await env.db.execute(
+        "UPDATE story_npcs SET last_seen_at=? WHERE npc_bot_id=?",
+        (env.clock.now, "npc:bot1:1"),
+    )
+    script_scene(
+        env,
+        opening={**OPENING, "present": ["阿澄"]},
+        turns=[
+            {**PLAIN_TURN, "end": False, "narration": "雨还在下。"},
+            PLAIN_TURN,
+        ],
+    )
+    env.llm.push("npc", {"inner": "心里不想出门", "action": "阿澄把伞递过来。"})
+    env.llm.push("npc", {"inner": "还是回去", "action": "阿澄先上楼了。"})
+    await env.director.run(BOT)
+    npc_calls = [call for call in env.llm.calls if call[0] == "npc"]
+    assert len(npc_calls) == 2
+    assert all("其实不想回去" not in call[2] for call in npc_calls)
+    stored = "\n".join(row["text"] for row in await env.db.fetchall("SELECT text FROM event_turns"))
+    assert "阿澄把伞递过来。" in stored
+    assert "心里不想出门" not in stored
+
+
+async def test_unknown_names_are_played_by_the_background_model(env):
+    await start_story(env)
+    script_scene(env, opening={**OPENING, "present": ["路人甲"]})
+    result = await env.director.run(BOT)
+    assert result.rounds == 1
+    assert [call for call in env.llm.calls if call[0] == "npc"] == []
+
+
+async def test_a_dormant_npc_wakes_when_there_is_a_slot(env):
+    await start_story(env)
+    await env.store.insert_npc(BOT, "npc:bot1:1", "阿澄", "室友", env.clock.now)
+    await env.db.execute(
+        "UPDATE story_npcs SET status='dormant', last_seen_at=? WHERE name='阿澄'",
+        (env.clock.now,),
+    )
+    script_scene(env, opening={**OPENING, "present": ["阿澄"]})
+    env.llm.push("npc", {"inner": "醒了", "action": "阿澄从房间里探出头。"})
+    await env.director.run(BOT)
+    row = await env.db.fetchone("SELECT status FROM story_npcs WHERE name='阿澄'")
+    assert row["status"] == "active"
+    assert any(call[0] == "npc" for call in env.llm.calls)
+
+
+async def test_a_dormant_npc_stays_asleep_when_the_roster_is_full(env):
+    await start_story(env)
+    now = env.clock.now
+    for index, name in enumerate(("甲", "乙", "丙"), start=1):
+        await env.store.insert_npc(BOT, f"npc:bot1:{index}", name, "同学", now)
+        await env.db.execute(
+            "UPDATE story_npcs SET last_seen_at=? WHERE name=?", (now, name)
+        )
+    await env.store.insert_npc(BOT, "npc:bot1:4", "阿澄", "室友", now)
+    await env.db.execute(
+        "UPDATE story_npcs SET status='dormant', last_seen_at=? WHERE name='阿澄'",
+        (now,),
+    )
+    script_scene(env, opening={**OPENING, "present": ["阿澄"]})
+    await env.director.run(BOT)
+    row = await env.db.fetchone("SELECT status FROM story_npcs WHERE name='阿澄'")
+    assert row["status"] == "dormant"
+    assert [call for call in env.llm.calls if call[0] == "npc"] == []
+
+
+async def test_idle_npcs_sleep_before_the_scene(env):
+    await start_story(env)
+    await env.store.insert_npc(BOT, "npc:bot1:1", "阿澄", "室友", env.clock.now)
+    await env.db.execute(
+        "UPDATE story_npcs SET last_seen_at=? WHERE name='阿澄'",
+        (env.clock.now - 15 * 86_400_000,),
+    )
+    script_scene(env)
+    await env.director.run(BOT)
+    row = await env.db.fetchone("SELECT status FROM story_npcs WHERE name='阿澄'")
+    assert row["status"] == "dormant"
+
+
+async def test_invalid_world_seed_is_not_saved(env):
+    await start_story(env)
+    before = (await env.store.seed_form(BOT))["outline"]
+    with pytest.raises(Exception):
+        await env.service.import_seed(
+            BOT, {"version": "world_seed/v1", "title": "坏", "outline": "太短", "entries": []}
+        )
+    assert (await env.store.seed_form(BOT))["outline"] == before

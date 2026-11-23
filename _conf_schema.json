@@ -365,8 +365,16 @@
       "refill_per_day": {"type": "int", "description": "唤醒额度每天回补多少次", "hint": "长期成本上限。一次唤醒最多约 2×轮数+6 次模型调用。", "default": 10, "slider": {"min": 1, "max": 60, "step": 1}},
       "bucket_capacity": {"type": "int", "description": "唤醒额度最多攒多少次", "default": 30, "slider": {"min": 1, "max": 200, "step": 1}},
       "max_rounds": {"type": "int", "description": "单次唤醒最多往返几轮", "default": 4, "slider": {"min": 1, "max": 8, "step": 1}},
-      "min_wake_minutes": {"type": "int", "description": "两次唤醒的最小间隔（分钟）", "default": 10},
-      "max_wake_minutes": {"type": "int", "description": "两次唤醒的最长间隔（分钟）；背景模型没预约时也按它", "default": 720},
+      "min_wake_minutes": {"type": "int", "description": "两次唤醒的最小间隔（分钟）；0 表示不限制", "default": 0},
+      "max_wake_minutes": {"type": "int", "description": "两次唤醒的最长间隔（分钟）；0 表示不限制。背景模型没写下次时间时不会拿它来兜底", "default": 0},
+      "share_per_day": {"type": "int", "description": "自发分享每天回补多少条", "default": 20},
+      "share_capacity": {"type": "int", "description": "自发分享最多攒多少条", "default": 20},
+      "share_per_round": {"type": "int", "description": "一轮行动里最多主动发几条；0 表示不限制", "default": 0},
+      "share_cooldown_minutes": {"type": "int", "description": "同一会话两次主动消息的冷却（分钟）；0 表示不冷却。打开后回告和补回也受它约束", "default": 0},
+      "quiet_hours": {"type": "string", "description": "安静时段，如 23:00-08:00；留空表示不设。打开后回告和补回也不发出", "default": ""},
+      "share_groups": {"type": "string", "description": "允许自发分享的群显示名，逗号分隔；留空则群里不自发分享", "default": ""},
+      "unread_keep": {"type": "int", "description": "没回的私聊保留最新几条，更早的丢掉", "default": 1},
+      "remote_threshold": {"type": "float", "description": "判断模型把一句话认成寄东西、点外卖或转账的概率达到多少才记账", "default": 0.6},
       "backfill_min_minutes": {"type": "int", "description": "空白期超过多少分钟才补叙", "default": 30},
       "tick_seconds": {"type": "int", "description": "故事巡检间隔（秒）", "default": 60},
       "retry_minutes": {"type": "int", "description": "一场失败后多久重试（分钟）", "default": 30},
@@ -380,7 +388,12 @@
       "notes_max_chars": {"type": "int", "description": "每次带给背景模型的主持人笔记总字数上限", "default": 2000},
       "card_stale_hours": {"type": "int", "description": "状态卡过了预计结束时间多少小时后不再注入聊天", "default": 6},
       "chat_boundary": {"type": "bool", "description": "聊天时提醒她只说现状、往事与打算，不把没发生的事说成已经发生", "default": true},
-      "narration": {"type": "string", "description": "背景模型写给她看的叙述用什么人称", "hint": "second：第二人称“你”；first：第一人称“我”，只写感知；none：不带人称，直接写现场。", "options": ["second", "first", "none"], "default": "first"}
+      "guard_real_names": {"type": "bool", "description": "拦下背景模型写到的联系人真名和引号原话", "hint": "默认关。关掉后名字和引号原话不再整段作废；第一人称下替她开口仍然会拦。打开后，上下文里出现过的联系人不能写进叙述，未了结的远方动作可以点名，引号原话整段作废。", "default": false},
+      "npc_active_max": {"type": "int", "description": "同时活跃的配角上限", "hint": "满了就不能再晋升，除非先休眠一个。休眠的人被点进在场名单时，有空位才会醒来。", "default": 3},
+      "npc_idle_days": {"type": "int", "description": "配角多少天没出场就自动休眠", "hint": "只算已经提交、并且他真正单独出场过的场。", "default": 14},
+      "spoiler_heavy": {"type": "bool", "description": "故事页显示主持人笔记和配角记忆", "hint": "默认关。完整转录、设定集和世界种子仍要在页面上确认后才展开。", "default": false},
+      "narration": {"type": "string", "description": "背景模型写给她看的叙述用什么人称", "hint": "second：第二人称“你”；first：第一人称“我”，只写感知；none：不带人称，直接写现场。", "options": ["second", "first", "none"], "default": "first"},
+      "thinking": {"type": "string", "description": "背景模型什么时候开思考", "hint": "close：只在收场开（默认）。scene：先判断这场有没有没收尾的事，有就把整场开开。plan：同一次判断，有就先写一场约束，执行不开思考。off：全程不开。思考走写作模型的直连地址；没配 text.base_url 时会跳过并退回不开。", "options": ["off", "close", "scene", "plan"], "default": "close"}
     }
   },
   "logging": {

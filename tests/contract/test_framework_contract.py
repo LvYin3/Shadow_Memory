@@ -138,8 +138,12 @@ def test_story_module_contract():
     assert "self.persona_manager = persona_manager" in context
     persona = read("astrbot/core/persona_mgr.py")
     assert "async def get_default_persona_v3" in persona
+    assert "umo: str | MessageSession | None = None" in persona
     assert "DEFAULT_PERSONALITY = Personality(" in persona
     assert 'prompt="You are a helpful and friendly assistant."' in persona
+    msg_type = read("astrbot/core/platform/message_type.py")
+    assert 'OTHER_MESSAGE = "OtherMessage"' in msg_type
+    assert 'FRIEND_MESSAGE = "FriendMessage"' in msg_type
 
 
 def test_tts_provider_contract():

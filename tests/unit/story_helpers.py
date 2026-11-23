@@ -32,6 +32,17 @@ CLOSING = {
     "next_wake_minutes": 45,
     "canon": [{"name": "便利店老板", "category": "人物", "body": "姓周，话少。"}],
     "notes": [{"title": "暗线", "body": "室友阿澄在瞒着她找工作"}],
+    "tree": {
+        "threads": [
+            {
+                "title": "暗线",
+                "people": ["阿澄"],
+                "canon": ["便利店老板"],
+                "seed": ["青屿大学"],
+                "scenes": [0],
+            }
+        ]
+    },
     "summary": "她在便利店躲雨，买到最后一把伞。",
 }
 MEMORY = {
@@ -92,10 +103,11 @@ class FakeStoryLLM:
     def __init__(self) -> None:
         self.queues: dict[str, list[Any]] = {"gm": [], "actor": []}
         self.calls: list[tuple[str, str, str]] = []
+        self.thinking: list[bool] = []
         self.unavailable: set[str] = set()
 
     def push(self, role: str, *values: Any) -> None:
-        self.queues[role].extend(values)
+        self.queues.setdefault(role, []).extend(values)
 
     def prompts(self, role: str) -> list[str]:
         return [user for called, _, user in self.calls if called == role]
@@ -106,9 +118,12 @@ class FakeStoryLLM:
     async def available(self, role: str, bot_id: str) -> bool:
         return role not in self.unavailable
 
-    async def ask_json(self, role, bot_id, system, user, *, validate=None):
+    async def ask_json(
+        self, role, bot_id, system, user, *, validate=None, thinking=False, search=None, tools_then_think=False
+    ):
         self.calls.append((role, system, user))
-        queue = self.queues[role]
+        self.thinking.append(bool(thinking))
+        queue = self.queues.setdefault(role, [])
         if not queue:
             raise StoryLLMError(f"{role} 没有给出合法输出", 2)
         value = queue.pop(0)

@@ -274,7 +274,7 @@ async def test_export_full_and_import(env):
     assert path.is_file()
     assert filename.endswith(".json")
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["version"] == "shadow_memory/full/v2"
+    assert payload["version"] == "shadow_memory/full/v3"
 
     result = await env.ui.import_memory("bot2", payload, force=True)
     assert result["counts"]["persona"] == 1

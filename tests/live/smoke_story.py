@@ -88,6 +88,7 @@ class DirectProvider:
         self.reasoning_tokens = 0
         self.cached_tokens = 0
         self.seconds = 0.0
+        self.usage_log: list[dict[str, int]] = []
 
     async def text_chat(self, *, prompt: str, system_prompt: str = "", contexts=None, **_: Any):
         messages = []
@@ -111,9 +112,17 @@ class DirectProvider:
                 f"HTTP {result.status} {result.error or str(result.text)[:200]}"
             )
         usage = result.body.get("usage") or {}
-        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+        prompt_n = int(usage.get("prompt_tokens") or 0)
+        hit = int(usage.get("prompt_cache_hit_tokens") or 0)
+        miss = int(usage.get("prompt_cache_miss_tokens") or 0)
+        self.prompt_tokens += prompt_n
         self.completion_tokens += int(usage.get("completion_tokens") or 0)
-        self.cached_tokens += int(usage.get("prompt_cache_hit_tokens") or 0)
+        self.cached_tokens += hit
+        self.usage_log.append({"prompt": prompt_n, "hit": hit, "miss": miss})
+        print(
+            f"  [{self.label} #{self.requests}] prompt {prompt_n} hit {hit} miss {miss}",
+            flush=True,
+        )
         details = usage.get("completion_tokens_details") or {}
         self.reasoning_tokens += int(details.get("reasoning_tokens") or 0)
         message = (result.body.get("choices") or [{}])[0].get("message") or {}
@@ -377,6 +386,10 @@ async def main() -> int:
                 f"（缓存命中 {provider.cached_tokens}），输出 {provider.completion_tokens} token"
                 f"（其中思考 {provider.reasoning_tokens}），共 {provider.seconds:.0f} 秒"
             )
+            for index, item in enumerate(provider.usage_log, start=1):
+                print(
+                    f"  #{index} prompt {item['prompt']} hit {item['hit']} miss {item['miss']}"
+                )
         print(f"写作模型：{getattr(stack.text, 'stats', {})}")
         print(f"判断模型：{getattr(stack.jev, 'stats', {})}")
         return 0

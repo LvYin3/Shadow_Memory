@@ -70,6 +70,7 @@ class Gate:
         now: int | None = None,
         conversation: dict[str, Any] | None = None,
         question_override: str | None = None,
+        situation: str = "",
     ) -> GateDecision:
         stamp = now or self.now_fn()
         cfg = self.configs(bot_id)
@@ -104,6 +105,8 @@ class Gate:
             "persona_tendencies": await self._tendencies(bot_id, message),
             "current_message": {"speaker": sender_name, "text": (message or "")[:500]},
         }
+        if situation.strip():
+            state["my_situation"] = situation.strip()[:200]
         judge_state = (
             {**state, "conversation": conversation} if conversation else state
         )

@@ -133,7 +133,8 @@ async def test_import_is_bot_scoped(stack):
 async def test_full_export_contains_events_and_persona(stack):
     await stack.service.import_seed("bot1", seed_payload())
     payload = await stack.service.export_full("bot1")
-    assert payload["version"] == "shadow_memory/full/v2"
+    assert payload["version"] == "shadow_memory/full/v3"
+    assert "story" in payload
     assert payload["events"] and payload["persona"]
     assert "insights" in payload and "notes" in payload
 

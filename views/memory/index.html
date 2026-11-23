@@ -20,6 +20,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="overview">概览</button>
       <button class="tab" data-tab="story">故事</button>
+      <button class="tab" data-tab="config">配置</button>
       <button class="tab" data-tab="settings">设置</button>
     </nav>
 
@@ -38,6 +39,17 @@
           <p id="story-master" class="muted"></p>
         </div>
         <div id="story-list" class="settings-list"></div>
+      </section>
+
+      <section id="panel-config" class="panel hidden">
+        <div class="settings-head">
+          <h2>插件配置</h2>
+          <p class="muted">和 AstrBot 自带配置页写的是同一份。保存后下一轮就生效，不用重载。密钥留空表示不改。按机器人的 TTS、门控问题和固定上下文，仍在「设置」页。</p>
+          <div class="row">
+            <button id="config-save" type="button">保存</button>
+          </div>
+        </div>
+        <div id="config-root"></div>
       </section>
 
       <section id="panel-settings" class="panel hidden">

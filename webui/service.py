@@ -16,6 +16,8 @@ from ..memory.ambient import AmbientService
 from ..memory.seed import SeedError
 from ..memory.service import MemoryService
 from ..memory.transfer import TransferService
+from ..story import tree as story_tree
+from ..story.world import CATEGORY_LABELS, WorldSeedError
 
 BACKUP_KEEP = 10
 GATE_QUESTION_MAX_CHARS = 2000
@@ -75,6 +77,8 @@ class WebUIService:
         ids.update(str(row["bot_id"]) for row in rows if row.get("bot_id"))
         rows = await self.db.fetchall("SELECT bot_id FROM story_state")
         ids.update(str(row["bot_id"]) for row in rows if row.get("bot_id"))
+        npc_ids = await self.db.fetchall("SELECT npc_bot_id FROM story_npcs")
+        ids.difference_update(str(row["npc_bot_id"]) for row in npc_ids)
         return sorted(ids)
 
     async def _last_event(self, bot_id: str) -> int | None:
@@ -440,6 +444,115 @@ class WebUIService:
         except Exception as exc:  # noqa: BLE001 - StoryError 等统一转成页面可读的错误
             raise WebUIError(str(exc)) from exc
 
+    async def story_spoiler(self, bot_id: str) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        story = self._story()
+        heavy = self.configs(bot_id).bool("story.spoiler_heavy", False)
+        scenes = await self.db.fetchall(
+            "SELECT id, started_at, status, transcript FROM story_scenes "
+            "WHERE bot_id=? ORDER BY id DESC LIMIT 30",
+            (bot_id,),
+        )
+        payload: dict[str, Any] = {
+            "bot_id": bot_id,
+            "spoiler_heavy": heavy,
+            "categories": [
+                {"id": key, "label": label} for key, label in CATEGORY_LABELS.items()
+            ],
+            "scenes": [
+                {
+                    "id": row["id"],
+                    "started_at": row["started_at"],
+                    "status": row["status"],
+                    "transcript": _json_list(row.get("transcript")),
+                }
+                for row in scenes
+            ],
+            "canon": await story.store.canon(bot_id),
+            "seed": await story.store.seed_form(bot_id),
+            "tree": story_tree.loads((await story.store.state(bot_id) or {}).get("tree")),
+        }
+        if not heavy:
+            return payload
+        payload["notes"] = await story.store.notes(bot_id)
+        payload["npcs"] = await self._npc_memories(bot_id)
+        return payload
+
+    async def story_save_seed(self, bot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        try:
+            return await self._story().import_seed(bot_id, payload)
+        except (WorldSeedError, ValueError) as exc:
+            raise WebUIError(str(exc)) from exc
+
+    async def story_save_note(self, bot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        self._require_heavy(bot_id)
+        title = str(payload.get("title") or "").strip()[:40]
+        body = str(payload.get("body") or "").strip()[:600]
+        if not title or not body:
+            raise WebUIError("笔记要有标题和正文")
+        note_id = int(payload.get("id") or 0)
+        now = self.now_fn()
+        try:
+            if note_id:
+                ok = await self._story().store.update_note(bot_id, note_id, title, body, now)
+                if not ok:
+                    raise WebUIError("没有这条笔记")
+                return {"id": note_id}
+            new_id = await self.db.execute(
+                "INSERT INTO story_notes(bot_id, title, body, scene_id, created_at, updated_at) "
+                "VALUES(?,?,?,NULL,?,?)",
+                (bot_id, title, body, now, now),
+            )
+        except WebUIError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise WebUIError("这则笔记没能保存，标题可能和已有的重复") from exc
+        return {"id": new_id}
+
+    async def story_delete_note(self, bot_id: str, note_id: int) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        self._require_heavy(bot_id)
+        ok = await self._story().store.delete_note(bot_id, int(note_id))
+        if not ok:
+            raise WebUIError("没有这条笔记")
+        return {"id": int(note_id), "deleted": True}
+
+    def _require_heavy(self, bot_id: str) -> None:
+        if not self.configs(bot_id).bool("story.spoiler_heavy", False):
+            raise WebUIError("重度剧透没打开")
+
+    async def _npc_memories(self, owner: str) -> list[dict[str, Any]]:
+        found: list[dict[str, Any]] = []
+        for row in await self._story().store.npcs(owner):
+            npc_id = str(row["npc_bot_id"])
+            persona = await self.db.fetchall(
+                "SELECT layer, text FROM persona_entries WHERE bot_id=? AND active=1 ORDER BY id",
+                (npc_id,),
+            )
+            facts = await self.db.fetchall(
+                "SELECT text FROM facts WHERE bot_id=? AND archived=0 ORDER BY id DESC LIMIT 20",
+                (npc_id,),
+            )
+            events = await self.db.fetchall(
+                "SELECT fragment FROM events WHERE bot_id=? AND fragment IS NOT NULL "
+                "ORDER BY id DESC LIMIT 5",
+                (npc_id,),
+            )
+            found.append(
+                {
+                    "name": row["name"],
+                    "status": row["status"],
+                    "last_seen_at": row.get("last_seen_at"),
+                    "relationship": row.get("relationship") or "",
+                    "persona": [{"layer": item["layer"], "text": item["text"]} for item in persona],
+                    "facts": [str(item["text"]) for item in facts if item.get("text")],
+                    "fragments": [str(item["fragment"]) for item in events if item.get("fragment")],
+                }
+            )
+        return found
+
     # ------------------------------------------------------------------ 文件
     def _require_bot_id(self, bot_id: Any) -> str:
         value = str(bot_id or "").strip()
@@ -466,3 +579,15 @@ class WebUIService:
                 path.unlink()
             except OSError:
                 pass
+
+
+def _json_list(value: Any) -> list:
+    if isinstance(value, list):
+        return value
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []

@@ -106,8 +106,9 @@ AstrBot cron 唤醒不触发 `on_llm_request`，所以备忘轮到点时靠 `mem
 2. `故事：未开启` → `/story on`；被拒绝时提示里写了缺什么（世界种子、基础人设、对话模型）；
 3. `故事：已暂停（连续 3 次失败……）` → 看下面的失败原因，处理后 `/story resume`；
 4. `唤醒额度` 不足 1 → 正常静默，等回补；`下次唤醒` 会显示攒够的时间；
-5. `下次唤醒` 还没到 → 背景模型上一场预约的时间；想马上演用 `/story wake`；
-6. 巡检每 `story.tick_seconds` 秒一次，插件启动后约 20 秒才开始。
+5. `下次唤醒` 还没到 → 背景模型上一场预约的时间；想马上演用 `/story wake`。显示为空是上一场没约上（漏写时间、追问后仍然没有），不会自动醒；
+6. 卡片或状态里出现 `暂缓唤醒` / `平台状态` → 该机器人的平台适配器未启用，或 `aiocqhttp` 反向 WebSocket 尚未连上（例如 NapCat 还没连回 `/ws`），巡检会自动暂缓等待连接恢复，不空耗额度；
+7. 巡检每 `story.tick_seconds` 秒一次，插件启动后约 20 秒才开始。
 
 **一场没演成：**
 
@@ -117,12 +118,12 @@ AstrBot cron 唤醒不触发 `on_llm_request`，所以备忘轮到点时靠 `mem
 
 **日志：**
 
-- INFO：`story_scene`（一场演完：轮数、调用次数、掷骰次数、显著度、新增设定、下次唤醒间隔、剩余额度）、`story_wait_tokens`、`story_enabled` / `story_disabled` / `story_paused` / `story_resumed`、`story_seed_imported`；
-- WARN：`故事场景失败`、`故事模型调用失败`、`故事模型输出不是 JSON 对象`、`故事模型输出不合格`（后面带原因，例如叙述里出现了现实联系人的名字，或第一人称叙述里替她说了话）、`故事模块配置的 provider 不可用`、`背景模型回想旧场景失败`（判断模型出错，这一场退回字面匹配）；
+- INFO：`story_scene`（一场演完：轮数、调用次数、掷骰次数、显著度、新增设定、下次唤醒间隔、剩余额度）、`story_wait_tokens`、`story_wait_platform`（平台未连接暂缓唤醒）、`story_enabled` / `story_disabled` / `story_paused` / `story_resumed`、`story_seed_imported`、`story_remote`（她看到的话被记成寄东西、点外卖或转账）、`thinking_skipped`（本该开思考，但没有配写作模型的直连地址，已退回不开）；
+- WARN：`故事场景失败`、`故事模型调用失败`、`故事模型输出不是 JSON 对象`、`故事模型输出不合格`（后面带原因，例如第一人称叙述里替她说了话，或开启 `guard_real_names` 后出现了现实联系人的名字）、`故事模块配置的 provider 不可用`、`跨会话发送失败`（含目标 `umo`、异常类名与反向 WS 连接状态诊断）；
 - ERROR：`故事连续 N 次失败，已自动暂停`；
-- DEBUG：`story_llm`（每次调用的角色与字数）、`story_past`（开场回想更早场景：候选几条、带上几条、每条的得分；`reason` 为 `judged` 是判断模型挑的，`literal` 是退回了字面匹配）、`environment_injected` 的 `story_lines`（状态卡注入了几行）。
+- DEBUG：`story_llm`（每次调用的角色与字数）、`environment_injected` 的 `story_lines`（状态卡注入了几行）。
 
-**背景模型忘了很早以前的事：** 最近 `recent_scenes` 场每次都带；更早的看 DEBUG 里的 `story_past`。没有这条日志说明还没有更早的场景，或 `past_scenes` 为 0；有日志但 `picked` 为 0，说明判断模型认为都用不上（得分都低于 `past_threshold`）。设定集和主持人笔记是另一条路：笔记按更新时间带，超过 `notes_max_chars` 的较早笔记不带，背景模型可以在 `lookup` 里写笔记标题去查。
+**背景模型忘了很早以前的事：** 开场默认带故事树（挂在线上的场次与设定，以及未挂线日常里最近 `recent_scenes` 场的梗概）。更早的场景细节需要背景模型在 `lookup` 里用 `#编号` 或关键词翻查，长期伏笔由背景模型通过 `read_story_notes` / `write_story_note` 工具维护在主持人笔记里。可在故事页点「剧透与种子」查看当前故事树（打开 `story.spoiler_heavy` 后还能查看和编辑主持人笔记）。
 
 **她在聊天里不提自己的生活：** 状态卡只是背景，不要求她主动说。确认 `environment_injected` 的 `story_lines > 0`；为 0 说明故事没开、状态卡已过期超过 `card_stale_hours`，或关了 `interaction.environment`。
 
@@ -130,10 +131,10 @@ AstrBot cron 唤醒不触发 `on_llm_request`，所以备忘轮到点时靠 `mem
 
 ## 备份与恢复
 
-- WebUI 故事页签「导出故事数据」：世界种子、设定集、主持人笔记、全部场景转录（含剧透）；目前只能导出，不能整体导回；
-- `/memory export full`：人格、活跃事实、事件；不含媒体、insights、excerpts；
+- WebUI 故事页签「导出故事数据」：世界种子、设定集、故事树、主持人笔记、全部场景转录（含剧透），用于单独查阅归档；
+- `/memory export full`（`shadow_memory/full/v3`）：人格、活跃事实、事件，以及完整的故事世界与配角记忆；不含媒体文件、insights、excerpts；
 - `/memory export seed`：小规模初始人格；
-- `/memory restore <文件> [force]`：恢复 full；
+- `/memory restore <文件> [force]`：恢复 `full` 备份（v3 备份会同步恢复故事世界与配角）；
 - `/memory import <文件> [force]`：导入 seed；
 - 非空库必须 `force`，恢复前自动备份 SQLite 和人格快照。
 
@@ -163,7 +164,8 @@ AstrBot cron 唤醒不触发 `on_llm_request`，所以备忘轮到点时靠 `mem
 |---|---|
 | `say(text, session?)` | 文字；每轮最多 3 段 |
 | `speak(text, session?)` | 语音；每轮最多 1 条、≤60 字 |
-| `silent()` | 本轮不说话 |
+| `silent()` | 本轮不说话。私聊里故事开着时，这句话记成未回 |
+| `act(intent, now?)` | 把要做的事交给故事。`now` 为 true 时只把预约提前，不另扣唤醒额度 |
 | `notes(action, kind?, title?, content?, tags?)` | 私人笔记 |
 | `memo(action, note?, at?, memo_id?)` | 备忘 |
 | `media(action, ...)` | 图片库 save/list/search/delete |

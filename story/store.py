@@ -23,6 +23,9 @@ _STATE_COLUMNS = {
     "world_title",
     "outline",
     "seed_meta",
+    "tree",
+    "share_tokens",
+    "share_tokens_at",
 }
 
 
@@ -240,6 +243,14 @@ class StoryStore:
             ),
         )
 
+    async def scene_briefs(self, bot_id: str) -> list[dict[str, Any]]:
+        """演成了的场，新的在前，只取编号和梗概，用来补故事树的日常节点。"""
+        return await self.db.fetchall(
+            "SELECT id, summary FROM story_scenes WHERE bot_id=? AND status='ok' "
+            "ORDER BY id DESC LIMIT 500",
+            (bot_id,),
+        )
+
     async def recent_scenes(
         self, bot_id: str, limit: int, *, ok_only: bool = True
     ) -> list[dict[str, Any]]:
@@ -337,4 +348,240 @@ class StoryStore:
             "canon": await self.canon(bot_id),
             "notes": await self.notes(bot_id),
             "scenes": scenes,
+        }
+
+    # ------------------------------------------------------------------ 与聊天连通
+    async def open_intents(self, bot_id: str) -> list[dict[str, Any]]:
+        return await self.db.fetchall(
+            "SELECT id, umo, display_name, body, created_at FROM story_intents "
+            "WHERE bot_id=? AND status='open' ORDER BY id",
+            (bot_id,),
+        )
+
+    async def add_intent(
+        self, bot_id: str, umo: str, display_name: str, body: str, now: int | None = None
+    ) -> int:
+        stamp = now or self.now_fn()
+        return await self.db.execute(
+            "INSERT INTO story_intents(bot_id, umo, display_name, body, status, created_at) "
+            "VALUES(?,?,?,?, 'open', ?)",
+            (bot_id, umo, display_name[:80], body[:300], stamp),
+        )
+
+    async def settle_intents(
+        self, bot_id: str, ids: set[int] | list[int], scene_id: int, now: int
+    ) -> None:
+        wanted = [int(item) for item in ids]
+        if not wanted:
+            return
+        marks = ",".join("?" for _ in wanted)
+        await self.db.execute(
+            f"UPDATE story_intents SET status='settled', scene_id=?, settled_at=? "
+            f"WHERE bot_id=? AND status='open' AND id IN ({marks})",
+            (scene_id, now, bot_id, *wanted),
+        )
+
+    async def open_remotes(self, bot_id: str) -> list[dict[str, Any]]:
+        return await self.db.fetchall(
+            "SELECT id, umo, display_name, kind, claim, created_at FROM story_remotes "
+            "WHERE bot_id=? AND status='open' ORDER BY id",
+            (bot_id,),
+        )
+
+    async def add_remote(
+        self,
+        bot_id: str,
+        umo: str,
+        display_name: str,
+        kind: str,
+        claim: str,
+        now: int | None = None,
+    ) -> int:
+        stamp = now or self.now_fn()
+        return await self.db.execute(
+            "INSERT INTO story_remotes(bot_id, umo, display_name, kind, claim, status, created_at) "
+            "VALUES(?,?,?,?,?, 'open', ?)",
+            (bot_id, umo, display_name[:80], kind, claim[:300], stamp),
+        )
+
+    async def resolve_remotes(
+        self, bot_id: str, outcomes: dict[int, str], scene_id: int, now: int
+    ) -> None:
+        for remote_id, status in outcomes.items():
+            await self.db.execute(
+                "UPDATE story_remotes SET status=?, scene_id=?, resolved_at=? "
+                "WHERE bot_id=? AND id=? AND status='open'",
+                (status, scene_id, now, bot_id, int(remote_id)),
+            )
+
+    async def unreads(self, bot_id: str) -> list[dict[str, Any]]:
+        return await self.db.fetchall(
+            "SELECT id, umo, display_name, text, created_at FROM story_unreads "
+            "WHERE bot_id=? ORDER BY id DESC",
+            (bot_id,),
+        )
+
+    async def add_unread(
+        self, bot_id: str, umo: str, display_name: str, text: str, keep: int, now: int | None = None
+    ) -> None:
+        """只留最新 keep 条，更早的丢掉。"""
+        stamp = now or self.now_fn()
+        limit = max(0, int(keep))
+        await self.db.execute(
+            "INSERT INTO story_unreads(bot_id, umo, display_name, text, created_at) "
+            "VALUES(?,?,?,?,?)",
+            (bot_id, umo, display_name[:80], text[:300], stamp),
+        )
+        if limit <= 0:
+            await self.db.execute("DELETE FROM story_unreads WHERE bot_id=?", (bot_id,))
+            return
+        await self.db.execute(
+            "DELETE FROM story_unreads WHERE bot_id=? AND id NOT IN "
+            "(SELECT id FROM story_unreads WHERE bot_id=? ORDER BY id DESC LIMIT ?)",
+            (bot_id, bot_id, limit),
+        )
+
+    async def drop_unread(self, bot_id: str, umo: str) -> None:
+        await self.db.execute(
+            "DELETE FROM story_unreads WHERE bot_id=? AND umo=?", (bot_id, umo)
+        )
+
+    async def last_send_at(self, bot_id: str, umo: str) -> int:
+        row = await self.db.fetchone(
+            "SELECT created_at FROM story_sends WHERE bot_id=? AND umo=? ORDER BY id DESC LIMIT 1",
+            (bot_id, umo),
+        )
+        return int(row["created_at"]) if row else 0
+
+    async def add_send(
+        self, bot_id: str, umo: str, kind: str, text: str, now: int
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO story_sends(bot_id, umo, kind, text, created_at) VALUES(?,?,?,?,?)",
+            (bot_id, umo, kind, text[:300], now),
+        )
+
+    async def catalog(self, bot_id: str, since: int, limit: int) -> list[dict[str, Any]]:
+        return await self.db.fetchall(
+            "SELECT umo, name, type, last_message_at FROM sessions "
+            "WHERE bot_id=? AND last_message_at>=? ORDER BY last_message_at DESC LIMIT ?",
+            (bot_id, int(since), int(limit)),
+        )
+
+    # ------------------------------------------------------------------ 配角
+    async def npcs(self, owner: str) -> list[dict[str, Any]]:
+        return await self.db.fetchall(
+            "SELECT npc_bot_id, name, relationship, status, last_seen_at, created_at "
+            "FROM story_npcs WHERE owner_bot_id=? ORDER BY id",
+            (owner,),
+        )
+
+    async def npc_bot_ids(self, status: str = "") -> set[str]:
+        if status:
+            rows = await self.db.fetchall(
+                "SELECT npc_bot_id FROM story_npcs WHERE status=?", (status,)
+            )
+        else:
+            rows = await self.db.fetchall("SELECT npc_bot_id FROM story_npcs")
+        return {str(row["npc_bot_id"]) for row in rows}
+
+    async def sleep_idle(self, owner: str, now: int, idle_ms: int) -> list[str]:
+        """太久没在已提交的场里出场的配角改为休眠。返回这次睡下去的名字。"""
+        cutoff = int(now) - int(idle_ms)
+        rows = await self.db.fetchall(
+            "SELECT name FROM story_npcs WHERE owner_bot_id=? AND status='active' "
+            "AND COALESCE(last_seen_at, created_at) < ?",
+            (owner, cutoff),
+        )
+        if not rows:
+            return []
+        await self.db.execute(
+            "UPDATE story_npcs SET status='dormant', updated_at=? "
+            "WHERE owner_bot_id=? AND status='active' AND COALESCE(last_seen_at, created_at) < ?",
+            (int(now), owner, cutoff),
+        )
+        return [str(row["name"]) for row in rows]
+
+    async def set_npc_status(self, npc_bot_id: str, status: str, now: int) -> None:
+        await self.db.execute(
+            "UPDATE story_npcs SET status=?, updated_at=? WHERE npc_bot_id=?",
+            (status, int(now), npc_bot_id),
+        )
+
+    async def retire_named(self, owner: str, names: list[str], now: int) -> None:
+        for name in names:
+            await self.db.execute(
+                "UPDATE story_npcs SET status='dormant', updated_at=? "
+                "WHERE owner_bot_id=? AND name=? AND status='active'",
+                (int(now), owner, name),
+            )
+
+    async def touch_npcs(self, npc_bot_ids: list[str], now: int) -> None:
+        for npc_bot_id in npc_bot_ids:
+            await self.db.execute(
+                "UPDATE story_npcs SET last_seen_at=?, updated_at=? WHERE npc_bot_id=?",
+                (int(now), int(now), npc_bot_id),
+            )
+
+    async def next_npc_seq(self, owner: str) -> int:
+        value = await self.db.scalar(
+            "SELECT COUNT(*) FROM story_npcs WHERE owner_bot_id=?", (owner,), default=0
+        )
+        return int(value or 0) + 1
+
+    async def insert_npc(
+        self,
+        owner: str,
+        npc_bot_id: str,
+        name: str,
+        relationship: str,
+        now: int,
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO story_npcs(owner_bot_id, npc_bot_id, name, relationship, status, "
+            "last_seen_at, created_at, updated_at) VALUES(?,?,?,?, 'active', NULL, ?, ?)",
+            (owner, npc_bot_id, name, relationship, int(now), int(now)),
+        )
+
+    async def update_note(self, bot_id: str, note_id: int, title: str, body: str, now: int) -> bool:
+        row = await self.db.fetchone(
+            "SELECT id FROM story_notes WHERE id=? AND bot_id=?", (int(note_id), bot_id)
+        )
+        if row is None:
+            return False
+        await self.db.execute(
+            "UPDATE story_notes SET title=?, body=?, updated_at=? WHERE id=? AND bot_id=?",
+            (title, body, int(now), int(note_id), bot_id),
+        )
+        return True
+
+    async def delete_note(self, bot_id: str, note_id: int) -> bool:
+        row = await self.db.fetchone(
+            "SELECT id FROM story_notes WHERE id=? AND bot_id=?", (int(note_id), bot_id)
+        )
+        if row is None:
+            return False
+        await self.db.execute(
+            "DELETE FROM story_notes WHERE id=? AND bot_id=?", (int(note_id), bot_id)
+        )
+        return True
+
+    async def seed_form(self, bot_id: str) -> dict[str, Any]:
+        """给编辑表单用的世界种子。条目只含种子层，不含演出追加的设定。"""
+        state = await self.state(bot_id) or {}
+        meta = self.seed_meta(state)
+        entries = await self.db.fetchall(
+            "SELECT category, name, body FROM story_canon "
+            "WHERE bot_id=? AND origin='seed' ORDER BY id",
+            (bot_id,),
+        )
+        return {
+            "title": state.get("world_title") or "",
+            "outline": state.get("outline") or "",
+            "entries": [
+                {"category": row["category"], "name": row["name"], "body": row["body"]}
+                for row in entries
+            ],
+            "hooks": list(meta.get("hooks") or []),
+            "opening": dict(meta.get("opening") or {}),
         }

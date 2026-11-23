@@ -19,6 +19,7 @@ EXPECTED_TOOLS = {
     "say",
     "speak",
     "silent",
+    "act",
     "notes",
     "memo",
     "qzone",
