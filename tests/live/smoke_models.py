@@ -5,6 +5,7 @@
 
 读取工作区根目录的 .env（或同名环境变量）：
 - DSH_TEST_DECISION_BASE_URL / DSH_TEST_DECISION_API_KEY / DSH_TEST_DECISION_MODEL
+  （没设时也认 DSH_TEST_JEV_BASE_URL / DSH_TEST_JEV_API_KEY / DSH_TEST_JEV_MODEL）
 - DSH_TEST_TEXT_BASE_URL / DSH_TEST_TEXT_API_KEY / DSH_TEST_TEXT_MODEL
 - DSH_TEST_VISION_MODEL（默认 deepseek-flash）
 
@@ -52,6 +53,9 @@ def load_env() -> dict[str, str]:
                 continue
             key, value = line.split("=", 1)
             data.setdefault(key.strip(), value.strip())
+    for suffix in ("BASE_URL", "API_KEY", "MODEL"):
+        if not data.get(f"DSH_TEST_DECISION_{suffix}") and data.get(f"DSH_TEST_JEV_{suffix}"):
+            data[f"DSH_TEST_DECISION_{suffix}"] = data[f"DSH_TEST_JEV_{suffix}"]
     return data
 
 

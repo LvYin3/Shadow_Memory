@@ -334,6 +334,7 @@ def test_narration_styles():
 
     first = prompts.gm_system("first")
     assert "叙述用第一人称" in first and "只写感知" in first and "第二人称" not in first
+    assert "这个“我”不是你" in first and "不是你自己的故事" in first
     assert "用“我”来写" in prompts.gm_open_task(first=False, backfill=True, style="first")
     assert "用“我”来写" in prompts.gm_close_task(min_wake=1, max_wake=2, style="first")
     none = prompts.gm_system("none")

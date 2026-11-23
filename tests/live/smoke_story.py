@@ -6,8 +6,11 @@
     $env:DSH_TEST_TEXT_MODEL="deepseek-chat"
     .venv\\Scripts\\python.exe -X utf8 astrbot_plugin_shadow_memory/tests/live/smoke_story.py --scenes 3
 
-只读环境变量，不读 .env，不打印密钥。背景模型、场景中的她、记忆整理、显著度判断都用同一个
-OpenAI 兼容站点；数据写在 ``.pytest_tmp/live_story/`` 下的临时库里，不碰真实数据。
+只读环境变量，不读 .env，不打印密钥。背景模型、场景中的她、记忆整理都用同一个 OpenAI 兼容
+站点（``--gm-model`` / ``--actor-model`` 可分别换模型，``--gm-thinking on|off`` 切 DeepSeek
+的思考模式）；判断模型设了 ``DSH_TEST_JEV_BASE_URL`` / ``DSH_TEST_JEV_API_KEY`` /
+``DSH_TEST_JEV_MODEL`` 就用真实的判断模型，否则借对话模型。数据写在 ``.pytest_tmp/live_story/``
+下的临时库里，不碰真实数据。
 
 它用真实模型连着演几场（每场之后把时钟拨到背景模型预约的时间），打印每一场她看到的经过、
 骰子、状态卡、新设定、笔记和她记下的记忆，最后给出调用次数、重试次数和 token 用量。
@@ -69,15 +72,20 @@ class DirectProvider:
     这样测出来的 JSON 遵从率才接近真实情况。
     """
 
-    def __init__(self, base_url: str, api_key: str, model: str, label: str) -> None:
+    def __init__(
+        self, base_url: str, api_key: str, model: str, label: str, thinking: str = "default"
+    ) -> None:
         self.url = chat_url(base_url)
         self.api_key = api_key
         self.model = model
         self.label = label
+        # default：不传，按模型自己的默认；on / off：DeepSeek 的 thinking 开关
+        self.thinking = thinking
         self.http = UrllibClient()
         self.requests = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.reasoning_tokens = 0
         self.cached_tokens = 0
         self.seconds = 0.0
 
@@ -86,12 +94,15 @@ class DirectProvider:
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
+        payload: dict[str, Any] = {"model": self.model, "messages": messages}
+        if self.thinking in ("on", "off"):
+            payload["thinking"] = {"type": "enabled" if self.thinking == "on" else "disabled"}
         started = time.perf_counter()
         result = await self.http.post_json(
             self.url,
-            {"model": self.model, "messages": messages},
+            payload,
             {"Authorization": f"Bearer {self.api_key}"},
-            timeout_s=120.0,
+            timeout_s=180.0,
         )
         self.seconds += time.perf_counter() - started
         self.requests += 1
@@ -103,8 +114,28 @@ class DirectProvider:
         self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
         self.completion_tokens += int(usage.get("completion_tokens") or 0)
         self.cached_tokens += int(usage.get("prompt_cache_hit_tokens") or 0)
+        details = usage.get("completion_tokens_details") or {}
+        self.reasoning_tokens += int(details.get("reasoning_tokens") or 0)
         message = (result.body.get("choices") or [{}])[0].get("message") or {}
         return SimpleNamespace(completion_text=message.get("content") or "")
+
+
+def decision_settings(text_base: str, text_key: str, text_model: str) -> dict[str, Any]:
+    """判断模型：设了 DSH_TEST_JEV_* 就用真实的判断模型，否则借对话模型走 chat 协议。"""
+    base = os.environ.get("DSH_TEST_JEV_BASE_URL", "").strip()
+    key = os.environ.get("DSH_TEST_JEV_API_KEY", "").strip()
+    if base and key:
+        return {
+            "base_url": base,
+            "api_key": key,
+            "model": os.environ.get("DSH_TEST_JEV_MODEL", "jev-latest").strip() or "jev-latest",
+            "protocol": "systemone",
+            "timeout_ms": 8000,
+        }
+    return {
+        "base_url": text_base, "api_key": text_key, "model": text_model,
+        "protocol": "chat", "timeout_ms": 15000,
+    }
 
 
 class Clock:
@@ -239,6 +270,10 @@ async def main() -> int:
         help="背景模型的叙述人称",
     )
     parser.add_argument("--start", default="", help="起始时间，如 2026-11-23T08:00；默认现在")
+    parser.add_argument("--gm-model", default="", help="背景模型；默认 DSH_TEST_TEXT_MODEL")
+    parser.add_argument("--actor-model", default="", help="场景中的她；默认 DSH_TEST_TEXT_MODEL")
+    parser.add_argument("--gm-thinking", default="default", choices=["default", "on", "off"])
+    parser.add_argument("--actor-thinking", default="default", choices=["default", "on", "off"])
     args = parser.parse_args()
 
     base = os.environ.get("DSH_TEST_TEXT_BASE_URL", "").strip()
@@ -247,6 +282,8 @@ async def main() -> int:
     if not base or not key:
         print("需要环境变量 DSH_TEST_TEXT_BASE_URL 和 DSH_TEST_TEXT_API_KEY")
         return 2
+    gm_model = args.gm_model or model
+    actor_model = args.actor_model or model
 
     logging.basicConfig(level=logging.WARNING, format="[%(levelname)s] %(message)s", stream=sys.stdout)
     workdir = ROOT / ".pytest_tmp" / "live_story"
@@ -259,10 +296,7 @@ async def main() -> int:
             "narration": args.narration,
         },
         "text": {"base_url": base, "api_key": key, "model": model, "max_tokens": 1200},
-        "decision": {
-            "base_url": base, "api_key": key, "model": model,
-            "protocol": "chat", "timeout_ms": 15000,
-        },
+        "decision": decision_settings(base, key, model),
     }
 
     def configs(bot_id: str = "") -> ConfigView:
@@ -284,8 +318,8 @@ async def main() -> int:
         )
         await seed_memory(db, clock.now)
         providers = {
-            "gm": DirectProvider(base, key, model, "背景模型"),
-            "actor": DirectProvider(base, key, model, "场景中的她"),
+            "gm": DirectProvider(base, key, gm_model, "背景模型", args.gm_thinking),
+            "actor": DirectProvider(base, key, actor_model, "场景中的她", args.actor_thinking),
         }
 
         async def resolve_provider(role: str, bot_id: str) -> DirectProvider:
@@ -307,7 +341,9 @@ async def main() -> int:
         await service.import_seed(BOT, world_seed())
         await service.enable(BOT)
         print(
-            f"模型：{model}   轮数上限：{args.rounds}   叙述人称：{args.narration}   "
+            f"背景模型：{gm_model}（思考 {args.gm_thinking}）   她：{actor_model}"
+            f"（思考 {args.actor_thinking}）   判断模型：{raw_config['decision']['model']}\n"
+            f"轮数上限：{args.rounds}   叙述人称：{args.narration}   "
             f"起始时间：{clock_mod.iso(clock.now)}"
         )
 
@@ -338,8 +374,8 @@ async def main() -> int:
         for role, provider in providers.items():
             print(
                 f"{provider.label}：{provider.requests} 次请求，输入 {provider.prompt_tokens} token"
-                f"（缓存命中 {provider.cached_tokens}），输出 {provider.completion_tokens} token，"
-                f"共 {provider.seconds:.0f} 秒"
+                f"（缓存命中 {provider.cached_tokens}），输出 {provider.completion_tokens} token"
+                f"（其中思考 {provider.reasoning_tokens}），共 {provider.seconds:.0f} 秒"
             )
         print(f"写作模型：{getattr(stack.text, 'stats', {})}")
         print(f"判断模型：{getattr(stack.jev, 'stats', {})}")

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -22,7 +23,10 @@ from ..memory.textutil import trim_at_boundary
 from . import bucket, oracle, prompts, world
 from .card import MINUTE_MS, StatusCard, build_card, load_card, render_for_gm
 from .llm import ROLE_ACTOR, ROLE_GM, StoryLLM, StoryLLMError
+from .recall import SCENE_REF, PastScenes, scene_line
 from .store import StoryStore, story_umo
+
+MAX_LOOKUPS = 6
 
 ConfigProvider = Callable[[str], ConfigView]
 # bot_id -> (基础人设文本, 来源说明)
@@ -52,6 +56,7 @@ class SceneProgress:
     rolls: list[dict[str, Any]] = field(default_factory=list)
     seed: dict[str, Any] = field(default_factory=dict)
     backfill: str = ""
+    past: list[str] = field(default_factory=list)  # 开场带上的更早场景
 
 
 @dataclass(slots=True)
@@ -104,6 +109,20 @@ REAL_PERSON_FEEDBACK = (
 )
 
 
+SPOKE_FOR_HER_FEEDBACK = (
+    "叙述里替她说了话（「{quote}」）。她说什么由扮演她的人自己写；"
+    "请改写，只写她看到、听到、感觉到的，不要出现她开口说的话。"
+)
+
+# 第一人称叙述里“我说：“……””这样的句子就是替她开口；只在第一人称下拦。
+_SPOKE_FOR_HER = re.compile(r"我(?:说|问|答|喊|回答|应)道?[：:，,\s]*[“「\"]")
+
+
+def _spoke_for_her(text: str) -> str:
+    match = _SPOKE_FOR_HER.search(text)
+    return text[match.start() : match.end() + 12] if match else ""
+
+
 def _narrated(value: dict[str, Any]) -> str:
     """背景模型这次输出里会被她读到的全部文字。"""
     parts = [value.get("backfill"), value.get("narration"), value.get("epilogue")]
@@ -117,18 +136,25 @@ def _mentioned(names: list[str], text: str) -> str:
     return next((name for name in names if name in text), "")
 
 
-def _guarded(base: Callable[[dict[str, Any]], bool], names: list[str]):
-    """在结构校验之外，再拦住“替现实里的人说话”。
+def _guarded(
+    base: Callable[[dict[str, Any]], bool], names: list[str], style: Any = None
+):
+    """在结构校验之外，再拦住“替现实里的人说话”，以及第一人称下“替她说话”。
 
     背景模型能从聊天摘要里看到她和谁聊过。要是它在场景里写“某某发来消息”，她就会
     记住一段现实里从没发生过的对话。提示词里禁止过，但模型不一定照做，所以这里硬拦。
     """
+    first_person = prompts.narration(style).key == "first"
 
     def validator(value: dict[str, Any]) -> bool | str:
         if not base(value):
             return False
-        name = _mentioned(names, _narrated(value))
-        return REAL_PERSON_FEEDBACK.format(name=name) if name else True
+        text = _narrated(value)
+        name = _mentioned(names, text)
+        if name:
+            return REAL_PERSON_FEEDBACK.format(name=name)
+        quote = _spoke_for_her(text) if first_person else ""
+        return SPOKE_FOR_HER_FEEDBACK.format(quote=quote) if quote else True
 
     return validator
 
@@ -156,6 +182,7 @@ class Director:
         self._base_card = base_card
         self.rng = rng or random.Random()
         self.now_fn = now_fn
+        self.past = PastScenes(store, getattr(memory, "jev", None), audit)
 
     # ------------------------------------------------------------------ 入口
     async def run(self, bot_id: str, *, manual: bool = False) -> SceneResult:
@@ -220,6 +247,7 @@ class Director:
             ),
             per_day=per_day,
             capacity=capacity,
+            progress=progress,
         )
         real_names = await self._real_names(bot_id, state, canon, context)
 
@@ -231,12 +259,12 @@ class Director:
             context
             + "\n\n"
             + prompts.gm_open_task(first=first, backfill=want_backfill, style=style),
-            validate=_guarded(_valid_opening, real_names),
+            validate=_guarded(_valid_opening, real_names, style),
         )
         progress.calls += used
         progress.backfill = _prose(opening.get("backfill"), 300) if want_backfill else ""
         progress.transcript.append({"role": "narrator", "text": _prose(opening["narration"], 400)})
-        lookups = self._lookups(canon, opening.get("lookup"))
+        lookups = await self._lookups(bot_id, canon, opening.get("lookup"), style)
 
         # ---- 她的上下文：人设、人格、常驻背景每轮都带；召回只在开场做一次
         prepared = await self.memory.prepare_turn(
@@ -275,6 +303,9 @@ class Director:
                 }
             )
             progress.rounds = round_no
+            lookups = lookups + self._mentioned_canon(
+                canon, progress.transcript[-1]["text"], context, lookups
+            )
 
             last = round_no >= max_rounds
             turn, used = await self.llm.ask_json(
@@ -294,10 +325,10 @@ class Director:
                         prompts.gm_turn_task(last=last),
                     ]
                 ),
-                validate=_guarded(_valid_turn, real_names),
+                validate=_guarded(_valid_turn, real_names, style),
             )
             progress.calls += used
-            lookups = self._lookups(canon, turn.get("lookup"))
+            lookups = await self._lookups(bot_id, canon, turn.get("lookup"), style)
             twist = ""
             check = turn.get("check")
             if isinstance(check, dict):
@@ -333,7 +364,7 @@ class Director:
                     prompts.gm_close_task(min_wake=min_wake, max_wake=max_wake, style=style),
                 ]
             ),
-            validate=_guarded(_valid_closing, real_names),
+            validate=_guarded(_valid_closing, real_names, style),
         )
         progress.calls += used
         # 现实里的人也不能被登记成世界设定（笔记是背景模型自己看的，可以提到）。
@@ -412,11 +443,62 @@ class Director:
             reverse=True,
         )
 
-    @staticmethod
-    def _lookups(canon: list[dict[str, Any]], names: Any) -> list[str]:
+    async def _lookups(
+        self, bot_id: str, canon: list[dict[str, Any]], names: Any, style: Any
+    ) -> list[str]:
+        """背景模型点名要查的东西：#编号 查那一场的经过，笔记标题查笔记，设定名查设定，
+        其余当作关键词去翻以前场景的梗概。"""
         if not isinstance(names, list):
             return []
-        return [world.render_entry(entry) for entry in world.find_by_names(canon, names)]
+        wanted = [str(name or "").strip() for name in names if str(name or "").strip()]
+        found: list[str] = []
+        words: list[str] = []
+        notes: list[dict[str, Any]] | None = None
+        for name in wanted[:MAX_LOOKUPS]:
+            ref = SCENE_REF.match(name)
+            if ref:
+                text = await self.past.scene_text(bot_id, int(ref.group(1)), style)
+                found.append(text or f"（没有 {name} 这一场）")
+                continue
+            if notes is None:
+                notes = await self.store.notes(bot_id)
+            note = next((note for note in notes if note["title"] == name), None)
+            if note is not None:
+                found.append(f"- [笔记] {note['title']}：{note['body']}")
+                continue
+            entries = world.find_by_names(canon, [name], 2)
+            if entries:
+                found.extend(world.render_entry(entry) for entry in entries)
+                continue
+            words.append(name)
+        missed: list[str] = []
+        for word in words:
+            scenes = await self.past.search(bot_id, [word], 2)
+            found.extend(f"- [以前的场景] {line}" for line in scenes)
+            if not scenes:
+                missed.append(word)
+        if missed:
+            found.append(f"（没有查到：{'、'.join(missed)}）")
+        unique: list[str] = []
+        for line in found:
+            if line not in unique:
+                unique.append(line)
+        return unique
+
+    @staticmethod
+    def _mentioned_canon(
+        canon: list[dict[str, Any]], action: str, context: str, shown: list[str]
+    ) -> list[str]:
+        """她这一步点到了某个设定、而背景模型手边没有它的内容时，替它查出来。"""
+        lines: list[str] = []
+        for entry in canon:
+            name = str(entry.get("name") or "")
+            if len(name) < 2 or name not in action:
+                continue
+            line = world.render_entry(entry)
+            if line not in context and line not in shown and line not in lines:
+                lines.append(line)
+        return lines[:MAX_LOOKUPS]
 
     async def _gm_context(
         self,
@@ -432,18 +514,16 @@ class Director:
         tokens: float,
         per_day: float,
         capacity: float,
+        progress: SceneProgress,
     ) -> str:
         meta = self.store.seed_meta(state)
         opening = meta.get("opening") if isinstance(meta.get("opening"), dict) else {}
         card = load_card(state.get("card"))
 
-        scenes = await self.store.recent_scenes(
-            bot_id, cfg.int("story.recent_scenes", 3, lo=0, hi=20)
-        )
+        recent_count = cfg.int("story.recent_scenes", 3, lo=0, hi=20)
+        scenes = await self.store.recent_scenes(bot_id, recent_count)
         scene_lines = [
-            f"{clock_mod.iso(int(row['started_at']))[5:16].replace('T', ' ')} {row.get('summary')}"
-            for row in reversed(scenes)
-            if str(row.get("summary") or "").strip()
+            scene_line(row) for row in reversed(scenes) if str(row.get("summary") or "").strip()
         ]
 
         # 上一场的结尾（她最后一步和之后的旁白），让新的一场接得上、不重演。
@@ -465,8 +545,7 @@ class Director:
             cfg.int("story.chat_digest_items", 5, lo=0, hi=20),
         )
 
-        # 先查再编：按她此刻的处境预取相关设定，其余只给名字。
-        query = " ".join(
+        situation = " ".join(
             [
                 card.where if card else "",
                 card.doing if card else "",
@@ -476,6 +555,39 @@ class Director:
                 *digest,
             ]
         )
+        card_text = render_for_gm(card, now)
+
+        # 更早的场景不衰减：粗筛后让判断模型挑出演下一场时值得想起的。
+        # 判断模型只看这里给的外显信息，不看她的人格和记忆。
+        pick = await self.past.pick(
+            bot_id,
+            skip=recent_count,
+            query=f"{situation} {last_ending}",
+            state={
+                "now": moment,
+                "her_status": card_text,
+                "recent_scenes": scene_lines,
+                "last_ending": last_ending[:400],
+            },
+            limit=cfg.int("story.past_scenes", 3, lo=0, hi=10),
+            candidates=cfg.int("story.past_candidates", 10, lo=1, hi=30),
+            threshold=cfg.float("story.past_threshold", 0.5, lo=0.0, hi=1.0),
+        )
+        if pick.judged:
+            progress.calls += 1
+        progress.past = list(pick.lines)
+        if pick.candidates:
+            self.audit.debug(
+                "story_past",
+                bot_id=bot_id,
+                reason=pick.reason,
+                candidates=pick.candidates,
+                picked=len(pick.lines),
+                scores={str(key): round(value, 2) for key, value in pick.scores.items()},
+            )
+
+        # 先查再编：按她此刻的处境预取相关设定，其余只给名字。
+        query = " ".join([situation, *pick.lines])
         limit = cfg.int("story.canon_context_items", 8, lo=0, hi=40)
         picked = world.search(canon, query, limit) or canon[:limit]
         picked_ids = {id(entry) for entry in picked}
@@ -509,10 +621,11 @@ class Director:
             notes=notes,
             hidden_notes=len(all_notes) - len(notes),
             scenes=scene_lines,
-            card=render_for_gm(card, now),
+            card=card_text,
             digest=digest,
             seed=seed,
             last_ending=last_ending,
+            past=pick.lines,
         )
 
     # ------------------------------------------------------------------ 进入记忆

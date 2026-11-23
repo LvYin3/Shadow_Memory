@@ -254,6 +254,32 @@ class StoryStore:
             (bot_id, int(limit)),
         )
 
+    async def older_scenes(
+        self, bot_id: str, skip: int, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """跳过最近 ``skip`` 场后演成了的场景（只取梗概），新的在前。"""
+        return await self.db.fetchall(
+            "SELECT id, started_at, summary FROM story_scenes WHERE bot_id=? AND status='ok' "
+            "ORDER BY id DESC LIMIT ? OFFSET ?",
+            (bot_id, int(limit), max(0, int(skip))),
+        )
+
+    async def scene(self, bot_id: str, scene_id: int) -> dict[str, Any] | None:
+        row = await self.db.fetchone(
+            "SELECT id, started_at, summary, backfill, transcript FROM story_scenes "
+            "WHERE bot_id=? AND id=? AND status='ok'",
+            (bot_id, int(scene_id)),
+        )
+        if row is None:
+            return None
+        transcript = _loads(row.get("transcript"), [])
+        row["transcript"] = (
+            [turn for turn in transcript if isinstance(turn, dict)]
+            if isinstance(transcript, list)
+            else []
+        )
+        return row
+
     async def last_transcript(self, bot_id: str) -> list[dict[str, Any]]:
         """上一场演成了的场景的完整转录（含她的内心，给谁看由调用方筛）。"""
         row = await self.db.fetchone(

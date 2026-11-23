@@ -290,6 +290,39 @@ async def test_world_seed_wins_when_a_contact_shares_a_name_with_a_character(env
     assert result.rounds == 1
 
 
+SPOKEN = "店员问要不要袋子。我说：“不用了，谢谢。”然后把伞夹在胳膊底下。"
+
+
+async def test_first_person_narration_cannot_speak_for_her(db, make_configs):
+    env = build_story(db, make_configs({"story": {"enabled": True, "narration": "first"}}))
+    await start_story(env)
+    script_scene(env, turns=[{**PLAIN_TURN, "narration": SPOKEN}])
+    with pytest.raises(SceneFailed, match="替她说了话"):
+        await env.director.run(BOT)
+    assert await story_events(env.db) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "店员问我要不要袋子，说完把伞递过来。",  # 别人问她，不是她开口
+        "我听见有人说：“雨要下到明天。”",
+        "我手里的伞还在滴水。",
+    ],
+)
+async def test_first_person_perception_is_not_mistaken_for_speech(db, make_configs, text):
+    env = build_story(db, make_configs({"story": {"enabled": True, "narration": "first"}}))
+    await start_story(env)
+    script_scene(env, turns=[{**PLAIN_TURN, "narration": text}])
+    assert (await env.director.run(BOT)).rounds == 1
+
+
+async def test_speech_guard_only_applies_to_first_person(env):
+    await start_story(env)
+    script_scene(env, turns=[{**PLAIN_TURN, "narration": SPOKEN}])
+    assert (await env.director.run(BOT)).rounds == 1
+
+
 # --------------------------------------------------------------------- 裁定骰
 CHECK_TURN = {
     "check": {
@@ -495,7 +528,7 @@ async def test_lookup_results_come_back_on_the_next_call(env):
     await start_story(env)
     script_scene(env, opening={**OPENING, "lookup": ["阿澄"]})
     await env.director.run(BOT)
-    assert "# 你查的设定\n- [人物] 阿澄：她的室友，学美术，作息混乱。" in env.llm.prompts("gm")[1]
+    assert "# 你查到的\n- [人物] 阿澄：她的室友，学美术，作息混乱。" in env.llm.prompts("gm")[1]
 
 
 # --------------------------------------------------------------------- 失败与原子性

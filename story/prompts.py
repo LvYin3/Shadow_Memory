@@ -43,6 +43,9 @@ NARRATIONS: dict[str, Narration] = {
         gm_rule=(
             "叙述用第一人称，以她的口吻写“我”此刻看到、听到、身体上感觉到的事，像她自己的感官记录；"
             "只写感知，不写她的想法、情绪、判断和决定，不替她说话、不替她行动。"
+            "这个“我”不是你：用第一人称只是为了让扮演她的人更容易代入。你写的是递到她眼前的感知，"
+            "不是你自己的故事，也不是她的日记；她接下来做什么、说什么由她自己写，"
+            "叙述里不要出现“我说”“我问”之类她开口说的话。"
         ),
         hint="用“我”来写",
         actor_line="{tag}写的是我此刻看到、听到、感觉到的，是已经发生的事；{me}后面才是我自己想的和做的。",
@@ -93,7 +96,7 @@ GM_SYSTEM = gm_system()
 _GM_OPEN_TASK_BACKFILL = """# 任务：开场
 1. backfill：概括从上一场结束到现在这段空白里她大致做了什么。以状态卡为依据，平淡带过，不安排转折，不超过 120 字，<<hint>>。
 2. narration：写出此刻她面前的情境，不超过 200 字，停在需要她自己决定做什么的地方。
-3. lookup：想查细节的设定名，没有就给空数组。
+3. lookup：想查的东西：设定名、笔记标题、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
 
 输出：{"backfill": "", "narration": "", "lookup": []}"""
 GM_OPEN_TASK_BACKFILL = _GM_OPEN_TASK_BACKFILL.replace(
@@ -103,14 +106,14 @@ GM_OPEN_TASK_BACKFILL = _GM_OPEN_TASK_BACKFILL.replace(
 GM_OPEN_TASK_PLAIN = """# 任务：开场
 1. backfill：这次不需要补叙，留空字符串。
 2. narration：写出此刻她面前的情境，不超过 200 字，停在需要她自己决定做什么的地方。
-3. lookup：想查细节的设定名，没有就给空数组。
+3. lookup：想查的东西：设定名、笔记标题、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
 
 输出：{"backfill": "", "narration": "", "lookup": []}"""
 
 GM_OPEN_TASK_FIRST = """# 任务：开场（这是故事的第一场）
 1. backfill：留空字符串。
 2. narration：从世界大纲给出的起点开始，写出此刻她面前的情境，不超过 200 字，停在需要她自己决定做什么的地方。
-3. lookup：想查细节的设定名，没有就给空数组。
+3. lookup：想查的东西：设定名、笔记标题、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
 
 输出：{"backfill": "", "narration": "", "lookup": []}"""
 
@@ -119,7 +122,7 @@ GM_TURN_TASK = """# 任务：裁定她刚才的行动，并写出接下来她感
 - 结果没有悬念：check 填 null，在 narration 里直接写结果和接下来的情境（不超过 200 字）。
 - 结果有悬念：填 check，narration 留空。likelihood 只能是：{likelihoods}。success 和 failure 各写一段完整的后续（各不超过 150 字），两段都要认真写，因为你不知道骰子会选哪一段。
 - 先判断这一场该不该结束：事情告一段落、接下来是一段不需要她做决定的平淡时间、或者她这一步没有实质行动，就把 end 设为 true，narration 只写一两句收住。{last_hint}
-- lookup：想查细节的设定名，没有就给空数组。
+- lookup：想查的东西：设定名、笔记标题、以前场景里的关键词，或场景编号（如 #12）；没有就给空数组。
 
 输出：{{"check": null, "narration": "", "lookup": [], "end": false}}
 check 的格式：{{"what": "她想做成的事", "likelihood": "很可能", "success": "", "failure": ""}}"""
@@ -190,6 +193,7 @@ def gm_context(
     digest: list[str],
     seed: dict[str, Any],
     last_ending: str = "",
+    past: list[str] | None = None,
 ) -> str:
     """背景模型每次调用都带的上帝视角信息。里面没有她的人格、洞察和私人笔记。"""
     now_lines = [moment]
@@ -237,6 +241,12 @@ def gm_context(
     else:
         blocks.append("# 你的笔记（她看不到）\n（还没有笔记）")
 
+    if past:
+        blocks.append(
+            "# 更早的、和此刻可能有关的场景\n"
+            + "\n".join(f"- {line}" for line in past)
+            + "\n想看哪一场的完整经过，就把它的编号（如 #12）放进 lookup。"
+        )
     if scenes:
         blocks.append("# 最近几场的梗概\n" + "\n".join(f"- {line}" for line in scenes))
     if last_ending:
@@ -279,7 +289,7 @@ def gm_progress(
             f"# 上一次掷骰\n结果是“{twist}”，{twist[-2:]}还没有体现，请在这次的叙述里体现。"
         )
     if lookups:
-        blocks.append("# 你查的设定\n" + "\n".join(lookups))
+        blocks.append("# 你查到的\n" + "\n".join(lookups))
     return "\n\n".join(blocks)
 
 
