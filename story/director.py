@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import random
@@ -23,6 +24,7 @@ from ..memory.service import MemoryService
 from ..memory.textutil import trim_at_boundary
 from . import bucket, cast, link, oracle, prompts, tree, world
 from .card import MINUTE_MS, StatusCard, build_card, load_card, render_for_gm
+from .knowledge import WorldKnowledge, format_world_turn_block, render_world_brief
 from .llm import ROLE_ACTOR, ROLE_GM, StoryLLM, StoryLLMError
 from .recall import SCENE_REF, PastScenes
 from .store import StoryStore, story_umo
@@ -101,6 +103,7 @@ class SceneProgress:
     cast_rows: list[dict[str, Any]] = field(default_factory=list)
     seen_npcs: list[str] = field(default_factory=list)
     note_writes: int = 0
+    photos: int = 0
 
 
 @dataclass(slots=True)
@@ -255,6 +258,11 @@ class Director:
         now_fn: Callable[[], int] = clock_mod.now_ms,
         send_text: Callable[[str, str], Awaitable[bool]] | None = None,
         search_tools: Callable[..., Any] | None = None,
+        image_service: Any = None,
+        send_photo: Callable[[str, bytes, str], Awaitable[bool]] | None = None,
+        save_photo_media: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        post_qzone_photo: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        spawn_bg: Callable[[Any], None] | None = None,
     ) -> None:
         self.db = db
         self.configs = configs
@@ -267,7 +275,19 @@ class Director:
         self.now_fn = now_fn
         self.send_text = send_text
         self._search_tools = search_tools
+        self.image_service = image_service
+        self.send_photo = send_photo
+        self.save_photo_media = save_photo_media
+        self.post_qzone_photo = post_qzone_photo
+        self._spawn_bg = spawn_bg
         self.past = PastScenes(store, getattr(memory, "jev", None), audit)
+        self.knowledge = WorldKnowledge(
+            store=store,
+            configs=configs,
+            audit=audit,
+            textgen=getattr(memory, "textgen", None),
+            jev=getattr(memory, "jev", None),
+        )
 
     def _search(self, bot_id: str = "") -> Any:
         """AstrBot 已启用的网页搜索。没开、或这一刻装不上，就当没有工具。"""
@@ -507,12 +527,30 @@ class Director:
         )
         if prepared.injection is not None and prepared.injection.candidates > 0:
             progress.calls += 1
+        photo_enabled = (
+            self.image_service is not None
+            and cfg.bool("image.enabled", False)
+            and cfg.int("image.story_max_per_scene", 1, lo=0, hi=3) > 0
+        )
+        auto_ref_enabled = (
+            self.image_service is not None
+            and cfg.bool("image.enabled", False)
+            and cfg.bool("image.ref.auto_generate", True)
+        )
+        known_entries = await self.store.known_canon(bot_id)
+        world_brief = render_world_brief(
+            str(state.get("known_outline") or ""),
+            known_entries,
+            include_tool_hint=False,
+        )
         actor_system = prompts.actor_system(
             base_card=base_card,
             persona=prepared.persona_text,
             ambient=prepared.ambient_text,
             moment=moment["text"],
             style=style,
+            photo_enabled=photo_enabled,
+            world_brief=world_brief,
         )
         recall_parts = list(prepared.parts)
 
@@ -528,11 +566,25 @@ class Director:
             seen = (
                 [{"role": "narrator", "text": progress.backfill}] if progress.backfill else []
             ) + progress.transcript
+            world_block = ""
+            if known_entries:
+                latest_query = self._actor_world_query(seen)
+                recent_texts = [
+                    str(item.get("text") or "").strip()
+                    for item in seen[-4:]
+                    if str(item.get("text") or "").strip()
+                ]
+                world_recall = await self.knowledge.recall_canon(
+                    bot_id, latest_query, recent_texts
+                )
+                if world_recall.judged:
+                    progress.calls += 1
+                world_block = format_world_turn_block(world_recall.entries)
             action, used = await self.llm.ask_json(
                 ROLE_ACTOR,
                 bot_id,
                 actor_system,
-                prompts.actor_user(seen, recall_parts, style, brief),
+                prompts.actor_user(seen, recall_parts, style, brief, world_block=world_block),
                 validate=_valid_action,
             )
             progress.calls += used
@@ -551,6 +603,10 @@ class Director:
             elif progress.address_retry == "open" and had_messages:
                 # 对上号再发一次就算用掉这次机会，后面不再因为对不上人加轮。
                 progress.address_retry = "used"
+            if photo_enabled and isinstance(action.get("photo"), dict):
+                await self._handle_story_photo(
+                    bot_id, cfg, action["photo"], progress, style
+                )
             lookups = lookups + self._mentioned_canon(
                 canon, progress.transcript[-1]["text"], context, lookups
             )
@@ -620,7 +676,12 @@ class Director:
                         lookups=lookups,
                         style=style,
                     ),
-                    prompts.gm_close_task(min_wake=min_wake, max_wake=max_wake, style=style),
+                    prompts.gm_close_task(
+                        min_wake=min_wake,
+                        max_wake=max_wake,
+                        style=style,
+                        auto_ref_enabled=auto_ref_enabled,
+                    ),
                 ]
             ),
             validate=_guarded(_valid_closing, real_names, style, allowed),
@@ -775,6 +836,19 @@ class Director:
             if line not in unique:
                 unique.append(line)
         return unique
+
+    @staticmethod
+    def _actor_world_query(seen: list[dict[str, Any]]) -> str:
+        """取她刚看到的新旁白/配角发言作为本轮世界常识检索词。"""
+        tail: list[str] = []
+        for turn in reversed(seen):
+            if turn.get("role") == "me":
+                break
+            text = str(turn.get("text") or "").strip()
+            if text:
+                tail.append(text)
+        tail.reverse()
+        return "\n".join(tail)
 
     @staticmethod
     def _mentioned_canon(
@@ -1190,6 +1264,211 @@ class Director:
     def _notice(progress: SceneProgress, text: str) -> None:
         progress.transcript.append({"role": "notice", "text": text})
 
+    async def _handle_story_photo(
+        self,
+        bot_id: str,
+        cfg: ConfigView,
+        raw: dict[str, Any],
+        progress: SceneProgress,
+        style: Any,
+    ) -> None:
+        """执行故事场内主动拍照，并按需分发至会话 / 媒体库 / QQ 空间。"""
+        cap = cfg.int("image.story_max_per_scene", 1, lo=0, hi=3)
+        if cap <= 0 or progress.photos >= cap:
+            return
+        scene = str(raw.get("scene") or "").strip()
+        if not scene:
+            return
+        target_name = str(raw.get("to") or raw.get("target") or "").strip()
+        caption = str(raw.get("text") or "").strip()[:200]
+        save_media = _yes(raw.get("save_media"))
+        want_qzone = _yes(raw.get("qzone"))
+        qzone_text = str(raw.get("qzone_text") or "").strip()[:500]
+
+        # 若仅想发给某会话，先检查投递条件避免白耗一次生图调用。
+        resolved_target: tuple[str, str, str, str] | None = None
+        if target_name:
+            resolved_target = await self._preflight_photo_target(
+                bot_id, cfg, target_name, progress
+            )
+            if resolved_target is None and not save_media and not want_qzone:
+                return
+
+        cast_lines = [
+            f"- {row['name']}：{row['relationship']}"
+            for row in progress.cast_rows
+            if row.get("name")
+        ]
+        story_live = {
+            "transcript": prompts.render_transcript(
+                progress.transcript, viewer="gm", style=style
+            ),
+            "cast": "\n".join(cast_lines),
+        }
+        try:
+            result = await self.image_service.take_photo(
+                bot_id=bot_id,
+                scene=scene,
+                kind="photo_story",
+                story_live=story_live,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("故事场内拍照异常（bot=%s）：%s", bot_id, exc)
+            self._notice(progress, "我试着拍了张照片，但没拍好。")
+            return
+        if not result.get("ok"):
+            self._notice(progress, f"我试着拍了张照片：{result.get('message') or '没拍好。'}")
+            return
+
+        progress.photos += 1
+        data: bytes = result["data"]
+        handle: str = str(result.get("handle") or "")
+        desc_text = str(result.get("raw_description") or scene[:80])
+        now = self.now_fn()
+
+        if resolved_target is not None:
+            umo, name, _, outbound = resolved_target
+            if outbound == "share" and not await self._take_share(bot_id, cfg, now):
+                self._notice(progress, "我拍好了照片，但今天发得够多了，没发出去。")
+            elif self.send_photo is None:
+                self._notice(progress, "我拍好了照片，但这会儿发不出去。")
+            else:
+                sent = await self.send_photo(umo, data, caption)
+                if not sent:
+                    if outbound == "share":
+                        await self._refund_share(bot_id, now)
+                    self._notice(progress, f"我拍好照片想发给{name}，但没送出去。")
+                else:
+                    memo_text = f"[发了一张照片：{scene[:60]}]" + (
+                        f" {caption}" if caption else ""
+                    )
+                    await self.store.add_send(bot_id, umo, outbound, memo_text, now)
+                    await self._remember_chat(bot_id, umo, memo_text, now)
+                    if outbound == "catchup":
+                        await self.store.drop_unread(bot_id, umo)
+                    self._notice(
+                        progress,
+                        f"我拍了张照片发给{name}" + (f"，附言：{caption}" if caption else "。"),
+                    )
+
+        if save_media and self.save_photo_media is not None:
+            try:
+                saved = await self.save_photo_media(
+                    bot_id=bot_id,
+                    data=data,
+                    name="story-photo",
+                    description=desc_text,
+                    source="story_photo",
+                    source_ref=handle,
+                )
+                if saved.get("ok"):
+                    self._notice(progress, f"我把刚拍的照片存进了图片库（{saved.get('filename') or ''}）。")
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("故事照片存图片库失败：%s", exc)
+
+        if want_qzone and self.post_qzone_photo is not None:
+            try:
+                qres = await self.post_qzone_photo(
+                    bot_id=bot_id,
+                    text=qzone_text or caption or scene[:80],
+                    images=[handle] if handle else [],
+                )
+                if qres.get("ok"):
+                    self._notice(progress, "我把刚拍的照片发了一条空间说说。")
+                else:
+                    self._notice(
+                        progress,
+                        f"我想把照片发空间，但没发出去（{qres.get('message') or '不可用'}）。",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("故事照片发空间失败：%s", exc)
+
+    async def _preflight_photo_target(
+        self,
+        bot_id: str,
+        cfg: ConfigView,
+        target: str,
+        progress: SceneProgress,
+    ) -> tuple[str, str, str, str] | None:
+        now = self.now_fn()
+        days = cfg.int("memo.catalog_days", 7, lo=1, hi=365)
+        limit = cfg.int("memo.catalog_limit", 10, lo=1, hi=100)
+        rows = await self.store.catalog(bot_id, now - days * 86_400_000, limit)
+        match = _match_session(rows, target)
+        if match is None:
+            self._notice(progress, f"我想拍照发给「{target}」，但找不到这个人。")
+            return None
+        if isinstance(match, list):
+            self._notice(progress, f"「{target}」对上了好几个人，这张照片没发。")
+            return None
+        umo, name, kind = match
+        unread = {str(row["umo"]) for row in await self.store.unreads(bot_id)}
+        outbound = link.classify_outbound(
+            umo, settled=progress.settled_umos, unread=unread
+        )
+        if str(kind) == "group" and outbound == "share":
+            if name not in link.group_names(cfg.str("story.share_groups", "")):
+                self._notice(progress, f"群「{name}」不在允许主动发的名单上，照片没发。")
+                return None
+        if link.quiet_active(cfg.str("story.quiet_hours", ""), now):
+            self._notice(progress, "这会儿太晚了，照片先没发出去。")
+            return None
+        cooldown = cfg.int("story.share_cooldown_minutes", 0, lo=0, hi=1440)
+        if cooldown:
+            last = await self.store.last_send_at(bot_id, umo)
+            if last and now - last < cooldown * MINUTE_MS:
+                self._notice(progress, f"我刚跟{name}说过，这会儿先不发照片。")
+                return None
+        return umo, name, kind, outbound
+
+    def _schedule_auto_refs(
+        self, bot_id: str, raw_requests: Any, scene_id: int
+    ) -> None:
+        if not isinstance(raw_requests, list) or self.image_service is None:
+            return
+        cleaned: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for item in raw_requests:
+            if not isinstance(item, dict):
+                continue
+            cat = str(item.get("category") or "").strip()
+            name = str(item.get("name") or "").strip()[:40]
+            appearance = str(item.get("appearance") or item.get("body") or "").strip()[:300]
+            if not cat or not name:
+                continue
+            key = (cat, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append({"category": cat, "name": name, "appearance": appearance})
+            if len(cleaned) >= 3:
+                break
+        if not cleaned:
+            return
+
+        async def _run() -> None:
+            for req in cleaned:
+                try:
+                    await self.image_service.generate_auto_ref(
+                        bot_id=bot_id,
+                        category=req["category"],
+                        name=req["name"],
+                        appearance=req["appearance"],
+                        scene_id=scene_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self.audit.warn(
+                        "异步自动生成参考图失败（bot=%s name=%s）：%s",
+                        bot_id,
+                        req["name"],
+                        exc,
+                    )
+
+        if self._spawn_bg is not None:
+            self._spawn_bg(_run())
+        else:
+            asyncio.create_task(_run())
+
     async def _store_tree(
         self, bot_id: str, cfg: ConfigView, closing: dict[str, Any], scene_id: int
     ) -> None:
@@ -1336,6 +1615,12 @@ class Director:
         await self._finish_nominations(
             bot_id, progress, ended, cfg.int("story.npc_active_max", 3, lo=1, hi=20)
         )
+        if (
+            self.image_service is not None
+            and cfg.bool("image.enabled", False)
+            and cfg.bool("image.ref.auto_generate", True)
+        ):
+            self._schedule_auto_refs(bot_id, closing.get("ref_requests"), scene_id)
 
         # 建边和“要不要进常驻背景”失败都不该让已经发生的事作废，所以放在事务之后。
         if memory["entities"] and cfg.bool("edges.enabled", True):

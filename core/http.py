@@ -33,6 +33,15 @@ class HTTPClient(Protocol):
         timeout_s: float = 5.0,
     ) -> HTTPResult: ...
 
+    async def post_multipart(
+        self,
+        url: str,
+        data: dict[str, Any] | list[tuple[str, Any]],
+        files: list[tuple[str, tuple[str, bytes, str]]],
+        headers: dict[str, str] | None = None,
+        timeout_s: float = 60.0,
+    ) -> HTTPResult: ...
+
     async def get_bytes(
         self,
         url: str,
@@ -62,6 +71,35 @@ class HttpxClient:
         try:
             async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
                 response = await client.post(url, json=payload, headers=headers or {})
+        except Exception as exc:  # noqa: BLE001 - 网络异常统一降级
+            return HTTPResult(error=f"{type(exc).__name__}: {exc}")
+
+        text = response.text or ""
+        body: Any = None
+        try:
+            body = response.json()
+        except Exception:  # noqa: BLE001 - 非 JSON 响应
+            body = None
+        return HTTPResult(status=response.status_code, body=body, text=text)
+
+    async def post_multipart(
+        self,
+        url: str,
+        data: dict[str, Any] | list[tuple[str, Any]],
+        files: list[tuple[str, tuple[str, bytes, str]]],
+        headers: dict[str, str] | None = None,
+        timeout_s: float = 60.0,
+    ) -> HTTPResult:
+        try:
+            import httpx
+        except ImportError as exc:  # pragma: no cover - AstrBot 环境一定有
+            return HTTPResult(error=f"httpx unavailable: {exc}")
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+                response = await client.post(
+                    url, data=data, files=files, headers=headers or {}
+                )
         except Exception as exc:  # noqa: BLE001 - 网络异常统一降级
             return HTTPResult(error=f"{type(exc).__name__}: {exc}")
 

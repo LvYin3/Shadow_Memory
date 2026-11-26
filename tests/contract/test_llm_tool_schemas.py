@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     "qzone",
     "media",
     "send_image",
+    "take_photo",
     "memory_search",
 }
 

@@ -92,7 +92,10 @@ async def test_seed_can_be_reimported_without_losing_play_canon(env):
     seed["title"] = "青屿（修订）"
     seed["entries"] = [{"category": "地点", "name": "北门夜市", "body": "晚上十点收摊。"}]
     result = await env.service.import_seed(BOT, seed)
-    assert result == {"title": "青屿（修订）", "entries": 1, "hooks": 1}
+    assert result["title"] == "青屿（修订）"
+    assert result["entries"] == 1
+    assert result["hooks"] == 1
+    assert result["gm_only"] == 1 and result["known"] == 0
     canon = await env.store.canon(BOT)
     assert [(row["origin"], row["name"]) for row in canon] == [
         ("seed", "北门夜市"),
@@ -394,3 +397,60 @@ async def test_platform_offline_defers_tick_and_blocks_manual_wake(env, caplog):
     after = await env.service.status(BOT)
     assert after["platform_warning"] == ""
     assert after["scenes_total"] == 1
+
+
+async def test_refill_day_adds_one_day_and_caps_without_touching_schedule(env):
+    await start_story(env)
+    now = env.clock()
+    scheduled = now + 2 * HOUR
+    await env.store.update_state(
+        BOT,
+        now,
+        tokens=0.97,
+        tokens_at=now,
+        share_tokens=3.5,
+        share_tokens_at=now,
+        next_wake_at=scheduled,
+    )
+
+    first = await env.service.refill_day(BOT)
+    assert first["before_tokens"] == 0.97
+    assert first["after_tokens"] == 10.97
+    assert first["tokens"] == 10.97
+    state = await env.store.state(BOT)
+    assert int(state["next_wake_at"]) == scheduled
+    assert float(state["share_tokens"]) == pytest.approx(3.5)
+
+    # 暂停态仍允许补充，并在容量处封顶
+    await env.service.pause(BOT)
+    second = await env.service.refill_day(BOT)
+    assert second["before_tokens"] == 10.97
+    assert second["after_tokens"] == 20.97
+
+    third = await env.service.refill_day(BOT)
+    assert third["before_tokens"] == 20.97
+    assert third["after_tokens"] == 30.0
+    assert third["tokens"] == 30.0
+    assert int((await env.store.state(BOT))["next_wake_at"]) == scheduled
+
+    with pytest.raises(StoryError, match="唤醒额度已满"):
+        await env.service.refill_day(BOT)
+
+
+async def test_refill_day_rejects_disabled_running_and_zero_rate(db, make_configs):
+    env = build_story(db, make_configs(STORY_ON))
+    await env.service.import_seed(BOT, world_seed())
+    with pytest.raises(StoryError, match="还没开启"):
+        await env.service.refill_day(BOT)
+
+    await env.service.enable(BOT)
+    async with env.service._lock(BOT):  # noqa: SLF001 - 模拟正在演一场
+        with pytest.raises(StoryError, match="正在演"):
+            await env.service.refill_day(BOT)
+
+    zero_env = build_story(
+        db,
+        make_configs({"story": {"enabled": True, "refill_per_day": 0, "bucket_capacity": 30}}),
+    )
+    with pytest.raises(StoryError, match="为 0"):
+        await zero_env.service.refill_day(BOT)

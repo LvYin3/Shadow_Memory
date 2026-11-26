@@ -56,14 +56,47 @@ def env(db, make_configs, workdir):
 
 async def test_world_seed_goes_through_the_import_dialog(env):
     result = await env.ui.import_memory(BOT, world_seed())
-    assert result == {
-        "bot_id": BOT,
-        "kind": "world_seed",
-        "counts": {"title": "青屿", "entries": 2, "hooks": 1},
-        "backup": "",
-    }
+    assert result["bot_id"] == BOT
+    assert result["kind"] == "world_seed"
+    assert result["backup"] == ""
+    assert result["counts"]["title"] == "青屿"
+    assert result["counts"]["entries"] == 2
+    assert result["counts"]["hooks"] == 1
     with pytest.raises(WebUIError, match="outline"):
         await env.ui.import_memory(BOT, {"version": "world_seed/v1", "outline": "太短"})
+
+
+async def test_story_webui_classify_and_toggle_visibility(env):
+    await env.ui.import_memory(BOT, world_seed())
+    # 默认未分类全部 gm_only
+    spoiler = await env.ui.story_spoiler(BOT)
+    assert all(row["visibility"] == "gm_only" for row in spoiler["canon"])
+
+    # 手工切换单条可见性
+    first_id = spoiler["canon"][0]["id"]
+    toggled = await env.ui.story_set_canon_visibility(BOT, first_id, "known")
+    assert toggled == {"id": first_id, "visibility": "known"}
+    spoiler_after = await env.ui.story_spoiler(BOT)
+    by_id = {row["id"]: row["visibility"] for row in spoiler_after["canon"]}
+    assert by_id[first_id] == "known"
+
+    # 一键自动提炼底稿与分类
+    env.stack.text.push(
+        {
+            "known_outline": "我在青屿大学读大三，住在学校北门外的合租屋。",
+            "entries": [
+                {"name": "阿澄", "visibility": "known"},
+                {"name": "青屿大学", "visibility": "gm_only"},
+            ],
+        }
+    )
+    classified = await env.ui.story_classify(BOT)
+    assert classified["known"] == 1 and classified["gm_only"] == 1
+    assert "青屿大学" in classified["known_outline"]
+    form = (await env.ui.story_spoiler(BOT))["seed"]
+    assert form["known_outline"] == classified["known_outline"]
+    vis_by_name = {item["name"]: item["visibility"] for item in form["entries"]}
+    assert vis_by_name == {"阿澄": "known", "青屿大学": "gm_only"}
 
 
 async def test_story_overview_lists_every_bot(env):
@@ -129,3 +162,23 @@ async def test_story_routes_fail_cleanly_without_the_module(env, make_configs):
     ):
         with pytest.raises(WebUIError, match="故事模块还没准备好"):
             await call
+
+
+async def test_story_action_refill(env):
+    await env.ui.import_memory(BOT, world_seed())
+    with pytest.raises(WebUIError, match="还没开启"):
+        await env.ui.story_action(BOT, "refill")
+
+    await env.ui.story_action(BOT, "on")
+    res = await env.ui.story_action(BOT, "refill")
+    assert res["before_tokens"] == 10.0
+    assert res["after_tokens"] == 20.0
+    assert res["tokens"] == 20.0
+
+    res2 = await env.ui.story_action(BOT, "refill")
+    assert res2["before_tokens"] == 20.0
+    assert res2["after_tokens"] == 30.0
+    assert res2["tokens"] == 30.0
+
+    with pytest.raises(WebUIError, match="唤醒额度已满"):
+        await env.ui.story_action(BOT, "refill")

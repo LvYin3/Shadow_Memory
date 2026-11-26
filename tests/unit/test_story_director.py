@@ -1271,3 +1271,61 @@ async def test_invalid_world_seed_is_not_saved(env):
             BOT, {"version": "world_seed/v1", "title": "坏", "outline": "太短", "entries": []}
         )
     assert (await env.store.seed_form(BOT))["outline"] == before
+
+
+async def test_actor_receives_known_world_knowledge_and_gm_canon_defaults_gm_only(env):
+    seed = world_seed()
+    seed["known_outline"] = "我知道这个世界存在时能，我在青溪县小院值守。"
+    seed["entries"] = [
+        {
+            "category": "其他",
+            "name": "时能与宇宙流速",
+            "body": "第四维度时间流动蕴含的能量称为时能。",
+            "visibility": "known",
+        },
+        {
+            "category": "其他",
+            "name": "冥蛇族与能力封印",
+            "body": "白映风本人不知情的血脉秘密。",
+            "visibility": "gm_only",
+        },
+    ]
+    await env.service.import_seed(BOT, seed)
+    await env.service.enable(BOT)
+    env.stack.jev.available = False
+
+    opening = {
+        "backfill": "",
+        "narration": "值班室监测终端响了一声，屏幕上的时能曲线出现轻微漂移。",
+        "lookup": [],
+    }
+    closing = {
+        **CLOSING,
+        "canon": [
+            {"name": "神秘黑盒", "category": "物品", "body": "幕后留下的未知装置。"},
+            {
+                "name": "老街五金店",
+                "category": "地点",
+                "body": "老板姓陈，专卖零碎金属件。",
+                "visibility": "known",
+            },
+        ],
+    }
+    script_scene(env, opening=opening, closing=closing)
+    await env.director.run(BOT)
+
+    actor_calls = [call for call in env.llm.calls if call[0] == "actor"]
+    assert actor_calls
+    _, actor_sys, actor_usr = actor_calls[0]
+    assert "# 我知道的这个世界" in actor_sys
+    assert "我知道这个世界存在时能" in actor_sys
+    assert "时能与宇宙流速" in actor_sys
+    assert "memory_search" not in actor_sys  # 故事 Actor 没有聊天工具提示
+    assert "冥蛇族" not in actor_sys
+    assert "【我知道的世界常识" in actor_usr
+    assert "第四维度时间流动蕴含的能量称为时能" in actor_usr
+    assert "冥蛇族" not in actor_usr
+
+    canon = {row["name"]: row["visibility"] for row in await env.store.canon(BOT)}
+    assert canon["神秘黑盒"] == "gm_only"
+    assert canon["老街五金店"] == "known"

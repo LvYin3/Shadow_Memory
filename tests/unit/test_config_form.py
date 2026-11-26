@@ -31,7 +31,15 @@ def _fields(schema):
 def test_groups_follow_the_six_blocks_and_the_level_rule():
     schema = load_schema()
     groups = {group["id"]: group for group in describe(schema)}
-    assert list(groups)[:6] == ["model", "memory", "interaction", "story", "logging", "bots"]
+    assert list(groups)[:7] == [
+        "model",
+        "memory",
+        "interaction",
+        "story",
+        "image",
+        "logging",
+        "bots",
+    ]
     assert "other" not in groups
     fields = _fields(schema)
     assert fields["decision.provider_id"]["level"] == "common"
@@ -153,3 +161,34 @@ def test_write_into_keeps_the_same_object():
     assert target is identity
     assert target == {"story": {"enabled": True}}
     assert copy.deepcopy(target) == target
+
+
+def test_invisible_image_providers_stays_hidden_and_preserved_on_apply():
+    schema = load_schema()
+    assert schema["image"]["items"]["providers"]["type"] == "list"
+    assert schema["image"]["items"]["providers"]["invisible"] is True
+    assert "image.providers" not in _fields(schema)
+
+    current = {
+        "image": {
+            "enabled": True,
+            "provider_id": "gem1",
+            "providers": [
+                {
+                    "id": "gem1",
+                    "name": "Gemini",
+                    "protocol": "gemini",
+                    "base_url": "https://g.example",
+                    "api_key": "sk-top-secret",
+                    "model": "gemini-2.5-flash-image",
+                }
+            ],
+        }
+    }
+    shown = present(schema, current)
+    assert "image.providers" not in shown["fields"]
+    assert "sk-top-secret" not in str(shown)
+
+    updated = apply(schema, current, {"fields": {"image.daily_limit": 30}})
+    assert updated["image"]["daily_limit"] == 30
+    assert updated["image"]["providers"] == current["image"]["providers"]

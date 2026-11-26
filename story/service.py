@@ -16,9 +16,15 @@ from ..core.locks import LockPool
 from . import bucket, link
 from .card import CHAT_BOUNDARY_LINE, MINUTE_MS, load_card, render_for_chat
 from .director import BaseCardResolver, Director, SceneFailed, SceneProgress, SceneResult
+from .knowledge import (
+    WorldKnowledge,
+    WorldRecallResult,
+    format_world_turn_block,
+    render_world_brief,
+)
 from .llm import ROLE_ACTOR, ROLE_GM, ROLE_LABELS, StoryLLM
 from .store import StoryStore
-from .world import WorldSeedError, validate_seed
+from .world import WorldSeedError, normalize_visibility, validate_seed
 
 ConfigProvider = Callable[[str], ConfigView]
 
@@ -50,6 +56,18 @@ class StoryService:
         self._waiting_platform: set[str] = set()
         self.now_fn = now_fn
         self._locks = LockPool()
+        existing_knowledge = getattr(director, "knowledge", None)
+        if isinstance(existing_knowledge, WorldKnowledge):
+            self.knowledge = existing_knowledge
+        else:
+            mem = getattr(director, "memory", None)
+            self.knowledge = WorldKnowledge(
+                store=store,
+                configs=configs,
+                audit=audit,
+                textgen=getattr(mem, "textgen", None),
+                jev=getattr(mem, "jev", None),
+            )
 
     # ------------------------------------------------------------------ 开关
     def master_enabled(self) -> bool:
@@ -92,9 +110,98 @@ class StoryService:
 
     async def import_seed(self, bot_id: str, data: Any) -> dict[str, Any]:
         seed = validate_seed(data)
-        counts = await self.store.replace_seed(bot_id, seed, self.now_fn())
-        self.audit.event("story_seed_imported", bot_id=bot_id, **counts)
-        return {"title": seed["title"], **counts}
+        explicit_brief = str(seed.get("known_outline") or "").strip()
+        explicit_vis = {
+            str(item["name"]): str(item["visibility"])
+            for item in seed["entries"]
+            if item.get("visibility") in {"known", "gm_only"}
+        }
+        now = self.now_fn()
+        counts = await self.store.replace_seed(bot_id, seed, now)
+        classified = await self.knowledge.classify_seed(
+            bot_id,
+            title=seed["title"],
+            outline=seed["outline"],
+            entries=seed["entries"],
+            explicit_known_outline=explicit_brief,
+            explicit_visibilities=explicit_vis,
+        )
+        if classified.auto_classified:
+            if classified.known_outline and not explicit_brief:
+                await self.store.update_known_outline(bot_id, classified.known_outline, now)
+            if classified.visibilities:
+                await self.store.update_canon_visibilities(
+                    bot_id, classified.visibilities, origin="seed"
+                )
+        self.audit.event(
+            "story_seed_imported",
+            bot_id=bot_id,
+            known=classified.known_count,
+            gm_only=classified.gm_only_count,
+            auto_classified=classified.auto_classified,
+            **counts,
+        )
+        return {
+            "title": seed["title"],
+            **counts,
+            "known": classified.known_count,
+            "gm_only": classified.gm_only_count,
+            "has_brief": bool(classified.known_outline),
+            "auto_classified": classified.auto_classified,
+        }
+
+    async def classify_world(self, bot_id: str) -> dict[str, Any]:
+        """对当前已导入的世界种子重新提炼角色底稿并分类种子条目可见性。"""
+        state = await self.store.state(bot_id)
+        if state is None or not str(state.get("outline") or "").strip():
+            raise StoryError("还没有导入世界种子")
+        seed_entries = [
+            row for row in await self.store.canon(bot_id) if row.get("origin") == "seed"
+        ]
+        classified = await self.knowledge.classify_seed(
+            bot_id,
+            title=str(state.get("world_title") or ""),
+            outline=str(state.get("outline") or ""),
+            entries=seed_entries,
+        )
+        if not classified.auto_classified:
+            raise StoryError("写作模型不可用或返回异常，未能完成自动提炼与分类，请稍后重试或手动勾选")
+        now = self.now_fn()
+        await self.store.update_known_outline(bot_id, classified.known_outline, now)
+        if classified.visibilities:
+            await self.store.update_canon_visibilities(
+                bot_id, classified.visibilities, origin="seed"
+            )
+        self.audit.event(
+            "story_world_classified",
+            bot_id=bot_id,
+            known=classified.known_count,
+            gm_only=classified.gm_only_count,
+            brief_chars=len(classified.known_outline),
+        )
+        return {
+            "bot_id": bot_id,
+            "known_outline": classified.known_outline,
+            "known": classified.known_count,
+            "gm_only": classified.gm_only_count,
+        }
+
+    async def set_canon_visibility(
+        self, bot_id: str, canon_id: int, visibility: str
+    ) -> dict[str, Any]:
+        normalized = normalize_visibility(visibility, default=None)
+        if normalized is None:
+            raise StoryError(f"可见性只能是 known 或 gm_only，收到：{visibility}")
+        ok = await self.store.set_canon_visibility(bot_id, int(canon_id), normalized)
+        if not ok:
+            raise StoryError("没有这条设定")
+        self.audit.event(
+            "story_canon_visibility",
+            bot_id=bot_id,
+            canon_id=int(canon_id),
+            visibility=normalized,
+        )
+        return {"id": int(canon_id), "visibility": normalized}
 
     async def enable(self, bot_id: str) -> dict[str, Any]:
         issues = await self.problems(bot_id)
@@ -157,6 +264,43 @@ class StoryService:
         await self.store.update_state(bot_id, now, **fields)
         self.audit.event("story_resumed", bot_id=bot_id)
         return await self.status(bot_id)
+
+    async def refill_day(self, bot_id: str) -> dict[str, Any]:
+        """立即为唤醒额度补充一天回补量（受桶容量封顶），不改动下次唤醒时间。"""
+        if self.is_running(bot_id):
+            raise StoryError("这个机器人正在演一场，等它结束再补")
+        async with self._lock(bot_id):
+            state = await self.store.state(bot_id)
+            if state is None or not int(state.get("enabled") or 0):
+                raise StoryError("这个机器人还没开启故事（先开启后再补额度）")
+            per_day, capacity = self._bucket_params(bot_id)
+            if per_day <= 0 or capacity <= 0:
+                raise StoryError("当前每天回补额度或上限为 0，无法补充")
+            now = self.now_fn()
+            before = bucket.refill(
+                float(state.get("tokens") or 0.0),
+                int(state.get("tokens_at") or 0),
+                now,
+                per_day=per_day,
+                capacity=capacity,
+            )
+            if before >= capacity - 1e-6:
+                raise StoryError("唤醒额度已满")
+            after = min(capacity, before + per_day)
+            await self.store.update_state(bot_id, now, tokens=after, tokens_at=now)
+            self.audit.event(
+                "story_tokens_refilled",
+                bot_id=bot_id,
+                before=round(before, 2),
+                after=round(after, 2),
+                added=round(after - before, 2),
+            )
+        status = await self.status(bot_id)
+        return {
+            **status,
+            "before_tokens": round(before, 2),
+            "after_tokens": round(after, 2),
+        }
 
     def platform_warning(self, bot_id: str) -> str:
         """平台未加载或反向 WS 未连接时返回提示文本；就绪或无需判断时返回空串。"""
@@ -313,12 +457,19 @@ class StoryService:
         )
 
     # ------------------------------------------------------------------ 聊天侧
-    async def chat_lines(self, bot_id: str, now: int | None = None) -> list[str]:
-        """注入聊天侧 ``# 我这会儿`` 的行：状态卡 + 只说现状、往事与打算的约束。"""
+    async def _world_active(self, bot_id: str) -> dict[str, Any] | None:
+        """故事总开关及该机器人已开启（含暂停中）时返回 state，关闭后返回 None。"""
         if not self.master_enabled():
-            return []
+            return None
         state = await self.store.state(bot_id)
         if state is None or not int(state.get("enabled") or 0):
+            return None
+        return state
+
+    async def chat_lines(self, bot_id: str, now: int | None = None) -> list[str]:
+        """注入聊天侧 ``# 我这会儿`` 的行：状态卡 + 只说现状、往事与打算的约束。"""
+        state = await self._world_active(bot_id)
+        if state is None:
             return []
         cfg = self.configs(bot_id)
         lines = render_for_chat(
@@ -329,6 +480,47 @@ class StoryService:
         if cfg.bool("story.chat_boundary", True):
             lines.append(CHAT_BOUNDARY_LINE)
         return lines
+
+    async def world_system_block(
+        self, bot_id: str, *, include_tool_hint: bool = True
+    ) -> str:
+        """注入主对话/Actor system prompt 的角色世界常识底稿与已知词条名索引。"""
+        state = await self._world_active(bot_id)
+        if state is None:
+            return ""
+        known = await self.store.known_canon(bot_id)
+        return render_world_brief(
+            str(state.get("known_outline") or ""),
+            known,
+            include_tool_hint=include_tool_hint,
+        )
+
+    async def world_turn_block(
+        self,
+        bot_id: str,
+        query: str,
+        recent_turns: list[str] | None = None,
+        *,
+        decision_context: dict[str, Any] | None = None,
+    ) -> tuple[str, WorldRecallResult]:
+        """按当前对话检索角色可见的详细设定条目，返回当轮临时注入文本与结果元数据。"""
+        if await self._world_active(bot_id) is None:
+            return "", WorldRecallResult(reason="story_off")
+        result = await self.knowledge.recall_canon(
+            bot_id,
+            query,
+            recent_turns,
+            decision_context=decision_context,
+        )
+        return format_world_turn_block(result.entries), result
+
+    async def search_known_canon(
+        self, bot_id: str, query: str, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        """供 memory_search 工具检索角色可见的世界设定条目。"""
+        if await self._world_active(bot_id) is None:
+            return []
+        return await self.knowledge.search_known(bot_id, query, limit)
 
     # ------------------------------------------------------------------ 观测
     async def status(self, bot_id: str) -> dict[str, Any]:
@@ -357,6 +549,7 @@ class StoryService:
             "pause_reason": state.get("pause_reason") or "",
             "running": self.is_running(bot_id),
             "has_seed": bool(str(state.get("outline") or "").strip()),
+            "has_known_outline": bool(str(state.get("known_outline") or "").strip()),
             "world_title": state.get("world_title") or "",
             "tokens": round(tokens, 2),
             "capacity": capacity,
@@ -371,6 +564,7 @@ class StoryService:
             "base_card_source": base_source if base_card.strip() else "",
             "base_card_chars": len(base_card.strip()),
             "canon": await self.store.canon_counts(bot_id),
+            "canon_known": len(await self.store.known_canon(bot_id)),
             "notes": len(await self.store.notes(bot_id)),
             "scenes_total": await self.store.scene_count(bot_id),
             # 只给她的视角（记忆碎片），不给背景模型的梗概，避免剧透

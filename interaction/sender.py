@@ -36,6 +36,7 @@ class SendState:
     speaks: int = 0
     spoken_texts: list[str] = field(default_factory=list)
     images: int = 0
+    photos: int = 0
     silent: bool = False
     sent: bool = False
     errors: list[str] = field(default_factory=list)

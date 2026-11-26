@@ -15,7 +15,7 @@ from .edges import EdgeRepo, entities_from_json
 from .persona import LAYERS, PersonaService
 from .seed import _remap_source_ids
 
-CATEGORIES = ("persona", "facts", "events", "insights", "notes", "media")
+CATEGORIES = ("persona", "facts", "events", "insights", "notes", "media", "image_refs")
 MAX_MEDIA_BYTES = 100 * 1024 * 1024
 MAX_MEDIA_FILES = 500
 
@@ -38,12 +38,14 @@ class TransferService:
         media_transfer: MediaTransfer,
         audit: Audit,
         now_fn: Callable[[], int] = clock_mod.now_ms,
+        ref_transfer: Any = None,
     ) -> None:
         self.db = db
         self.configs = configs
         self.persona = persona
         self.edges = edges
         self.media_transfer = media_transfer
+        self.ref_transfer = ref_transfer
         self.audit = audit
         self.now_fn = now_fn
 
@@ -136,6 +138,9 @@ class TransferService:
                 media.get("files", 0) > MAX_MEDIA_FILES
                 or media.get("bytes", 0) > MAX_MEDIA_BYTES
             )
+        image_refs = {"rows": 0, "files": 0, "bytes": 0, "missing": 0}
+        if "image_refs" in cats and self.ref_transfer is not None:
+            image_refs.update(await self.ref_transfer.preview(source, target))
         return {
             "source": source,
             "target": target,
@@ -144,6 +149,7 @@ class TransferService:
             "counts": counts,
             "skip": skip,
             "media": media,
+            "image_refs": image_refs,
         }
 
     @staticmethod
@@ -199,8 +205,9 @@ class TransferService:
 
         story = await carry.export_world(self.db, source) if mode == "replace" else None
         if (
-            not any(data[cat] for cat in cats if cat != "media")
+            not any(data[cat] for cat in cats if cat not in {"media", "image_refs"})
             and "media" not in cats
+            and "image_refs" not in cats
             and not carry.has_world(story)
         ):
             raise TransferError("源机器人没有可转移的内容")
@@ -372,6 +379,11 @@ class TransferService:
             except Exception as exc:  # noqa: BLE001
                 self.audit.warn("转移建边失败：%s", exc)
 
+        ref_result = {"copied": 0, "skipped": 0}
+        if "image_refs" in cats and self.ref_transfer is not None:
+            ref_result = await self.ref_transfer.apply(source, target, mode=mode)
+            counts["image_refs"] = int(ref_result.get("copied") or 0)
+
         result = {
             "source": source,
             "target": target,
@@ -386,6 +398,7 @@ class TransferService:
                 "failed": media_plan.get("failed", []) if media_plan else [],
                 "bytes": media_plan.get("bytes", 0) if media_plan else 0,
             },
+            "image_refs": ref_result,
         }
         self.audit.event("memory_transfer", bot_id=target, source=source, mode=mode, **counts)
         return result

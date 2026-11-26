@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -11,6 +12,8 @@ from ..core.audit import Audit
 from ..core.config import ConfigView, gate_question_text, resolve_gate_question
 from ..core.db import Database
 from ..core.kv import KvStore
+from ..imaging.providers import PROTOCOL_LABELS, PROTOCOLS, normalize_provider
+from ..imaging.refs import REF_CATEGORIES, REF_CATEGORY_LABELS, RefError
 from ..interaction.media import MediaService
 from ..memory.ambient import AmbientService
 from ..memory.seed import SeedError
@@ -47,8 +50,14 @@ class WebUIService:
         platform_ids: Callable[[], list[str]] | None = None,
         now_fn: Callable[[], int] = clock_mod.now_ms,
         story: Any = None,
+        image: Any = None,
+        config_raw: Any = None,
+        save_config: Callable[[], None] | None = None,
     ) -> None:
         self.story = story
+        self.image = image
+        self._config_raw = config_raw
+        self._save_config = save_config
         self.db = db
         self.configs = configs
         self.memory = memory
@@ -76,6 +85,8 @@ class WebUIService:
         rows = await self.db.fetchall("SELECT DISTINCT bot_id FROM kv")
         ids.update(str(row["bot_id"]) for row in rows if row.get("bot_id"))
         rows = await self.db.fetchall("SELECT bot_id FROM story_state")
+        ids.update(str(row["bot_id"]) for row in rows if row.get("bot_id"))
+        rows = await self.db.fetchall("SELECT DISTINCT bot_id FROM image_refs")
         ids.update(str(row["bot_id"]) for row in rows if row.get("bot_id"))
         npc_ids = await self.db.fetchall("SELECT npc_bot_id FROM story_npcs")
         ids.difference_update(str(row["npc_bot_id"]) for row in npc_ids)
@@ -430,6 +441,7 @@ class WebUIService:
             "off": story.disable,
             "pause": story.pause,
             "resume": story.resume,
+            "refill": story.refill_day,
         }
         try:
             if action == "wake":
@@ -437,7 +449,7 @@ class WebUIService:
                 return {"bot_id": bot_id, "started": True}
             handler = handlers.get(action)
             if handler is None:
-                raise WebUIError("action 只能是 on / off / pause / resume / wake")
+                raise WebUIError("action 只能是 on / off / pause / resume / wake / refill")
             return await handler(bot_id)
         except WebUIError:
             raise
@@ -483,6 +495,22 @@ class WebUIService:
         try:
             return await self._story().import_seed(bot_id, payload)
         except (WorldSeedError, ValueError) as exc:
+            raise WebUIError(str(exc)) from exc
+
+    async def story_classify(self, bot_id: str) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        try:
+            return await self._story().classify_world(bot_id)
+        except Exception as exc:  # noqa: BLE001
+            raise WebUIError(str(exc)) from exc
+
+    async def story_set_canon_visibility(
+        self, bot_id: str, canon_id: int, visibility: str
+    ) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        try:
+            return await self._story().set_canon_visibility(bot_id, int(canon_id), visibility)
+        except Exception as exc:  # noqa: BLE001
             raise WebUIError(str(exc)) from exc
 
     async def story_save_note(self, bot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -552,6 +580,334 @@ class WebUIService:
                 }
             )
         return found
+
+    # ------------------------------------------------------------------ 生图
+    def _image(self) -> Any:
+        if self.image is None:
+            raise WebUIError("生图模块还没准备好")
+        return self.image
+
+    def _raw_providers(self) -> list[dict[str, Any]]:
+        if isinstance(self._config_raw, dict):
+            sec = self._config_raw.get("image")
+            if isinstance(sec, dict) and isinstance(sec.get("providers"), list):
+                return [
+                    normalize_provider(item)
+                    for item in sec["providers"]
+                    if isinstance(item, dict)
+                ]
+        cfg_list = self.configs("").get("image.providers", [])
+        if isinstance(cfg_list, list):
+            return [
+                normalize_provider(item)
+                for item in cfg_list
+                if isinstance(item, dict)
+            ]
+        return []
+
+    def _masked_providers(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for item in self._raw_providers():
+            masked = dict(item)
+            masked["api_key_set"] = bool(masked.pop("api_key", ""))
+            out.append(masked)
+        return out
+
+    async def image_overview(self, bot_id: str = "") -> dict[str, Any]:
+        img = self._image()
+        bots = await self.bot_ids()
+        chosen = (bot_id or "").strip()
+        if chosen:
+            chosen = self._require_bot_id(chosen)
+        elif bots:
+            chosen = bots[0]
+
+        global_cfg = self.configs("")
+        active_refs: list[dict[str, Any]] = []
+        pending: dict[str, Any] = {
+            "total": 0,
+            "cap_total": global_cfg.int("image.ref.max_pending_total", 15, lo=1, hi=200),
+            "cap_per_subject": global_cfg.int("image.ref.max_pending_per_subject", 3, lo=1, hi=20),
+            "full": False,
+            "groups": [],
+        }
+        usage = {"used": 0, "limit": global_cfg.int("image.daily_limit", 20, lo=0, hi=1000)}
+        recent_logs: list[dict[str, Any]] = []
+        bot_enabled = global_cfg.bool("image.enabled", False)
+        bot_provider_id = global_cfg.str("image.provider_id", "")
+        story_enabled = global_cfg.bool("story.enabled", False)
+
+        if chosen:
+            cfg = self.configs(chosen)
+            bot_enabled = cfg.bool("image.enabled", False)
+            bot_provider_id = cfg.str("image.provider_id", "")
+            story_enabled = cfg.bool("story.enabled", False)
+            active_refs = await img.refs.list_active(chosen)
+            pending = await img.refs.pending_summary(chosen)
+            used, limit = await img.daily_usage(chosen)
+            usage = {"used": used, "limit": limit}
+            recent_logs = await self.db.fetchall(
+                "SELECT id, kind, provider_id, protocol, ref_count, retries, review_status, "
+                "status, error, latency_ms, created_at FROM image_logs "
+                "WHERE bot_id=? ORDER BY id DESC LIMIT 15",
+                (chosen,),
+            )
+
+        return {
+            "bots": bots,
+            "bot": chosen,
+            "enabled": global_cfg.bool("image.enabled", False),
+            "bot_enabled": bot_enabled,
+            "story_enabled": story_enabled,
+            "default_provider_id": global_cfg.str("image.provider_id", ""),
+            "bot_provider_id": bot_provider_id,
+            "providers": self._masked_providers(),
+            "protocols": [
+                {"id": p, "label": PROTOCOL_LABELS.get(p, p)} for p in PROTOCOLS
+            ],
+            "categories": [
+                {"id": c, "label": REF_CATEGORY_LABELS.get(c, c)}
+                for c in REF_CATEGORIES
+            ],
+            "usage": usage,
+            "active_refs": active_refs,
+            "pending": pending,
+            "recent_logs": recent_logs,
+        }
+
+    async def image_ref_file(self, bot_id: str, ref_id: int) -> tuple[Path, str, str]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        try:
+            row, _, mime = await img.refs.read_bytes(bot_id, int(ref_id))
+        except RefError as exc:
+            raise WebUIError(str(exc)) from exc
+        mdir = (
+            img.refs.pending_dir(bot_id)
+            if row["status"] == "pending"
+            else img.refs.active_dir(bot_id)
+        )
+        return mdir.path_of(row["filename"]), row["filename"], mime
+
+    async def image_ref_data_url(self, bot_id: str, ref_id: int) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        try:
+            row, data, mime = await img.refs.read_bytes(bot_id, int(ref_id))
+        except RefError as exc:
+            raise WebUIError(str(exc)) from exc
+        encoded = base64.b64encode(data).decode("ascii")
+        return {
+            "id": row["id"],
+            "mime": mime,
+            "data_url": f"data:{mime};base64,{encoded}",
+        }
+
+    async def image_ref_upload(self, bot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        raw_b64 = str(payload.get("data_base64") or "").strip()
+        if raw_b64.startswith("data:") and "," in raw_b64:
+            raw_b64 = raw_b64.split(",", 1)[1]
+        if not raw_b64:
+            raise WebUIError("缺少图片数据")
+        try:
+            data = base64.b64decode(raw_b64, validate=False)
+        except (ValueError, TypeError) as exc:
+            raise WebUIError("图片 base64 解码失败") from exc
+        try:
+            item = await img.refs.add_active(
+                bot_id,
+                category=str(payload.get("category") or ""),
+                name=str(payload.get("name") or ""),
+                data=data,
+                description=str(payload.get("description") or ""),
+                source="upload",
+            )
+        except RefError as exc:
+            raise WebUIError(str(exc)) from exc
+        return {"ok": True, "item": item}
+
+    async def image_ref_update(self, bot_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        ref_id = int(payload.get("id") or 0)
+        if ref_id <= 0:
+            raise WebUIError("缺少参考图 ID")
+        try:
+            item = await img.refs.update_ref(
+                bot_id,
+                ref_id,
+                name=payload.get("name") if "name" in payload else None,
+                description=payload.get("description") if "description" in payload else None,
+                category=payload.get("category") if "category" in payload else None,
+            )
+        except RefError as exc:
+            raise WebUIError(str(exc)) from exc
+        return {"ok": True, "item": item}
+
+    async def image_ref_delete(self, bot_id: str, ref_id: int) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        try:
+            await img.refs.delete_ref(bot_id, int(ref_id))
+        except RefError as exc:
+            raise WebUIError(str(exc)) from exc
+        return {"ok": True, "id": int(ref_id)}
+
+    async def image_pending_approve(
+        self, bot_id: str, ref_id: int, *, description: Any = None
+    ) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        try:
+            item = await img.refs.approve_pending(
+                bot_id,
+                int(ref_id),
+                description=str(description) if description is not None else None,
+            )
+        except RefError as exc:
+            raise WebUIError(str(exc)) from exc
+        return {"ok": True, "item": item}
+
+    async def image_pending_reject(self, bot_id: str, ref_id: int) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        try:
+            await img.refs.reject_pending(bot_id, int(ref_id))
+        except RefError as exc:
+            raise WebUIError(str(exc)) from exc
+        return {"ok": True, "id": int(ref_id)}
+
+    async def image_pending_regenerate(
+        self, bot_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        result = await img.generate_auto_ref(
+            bot_id=bot_id,
+            category=str(payload.get("category") or ""),
+            name=str(payload.get("name") or ""),
+            appearance=str(payload.get("description") or payload.get("appearance") or ""),
+            force=True,
+        )
+        if not result.get("ok"):
+            raise WebUIError(str(result.get("message") or "补生参考图失败"))
+        return result
+
+    async def image_providers_save(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(self._config_raw, dict):
+            raise WebUIError("当前配置对象不支持写入")
+        raw_list = payload.get("providers")
+        if not isinstance(raw_list, list):
+            raise WebUIError("providers 必须是数组")
+
+        existing_keys = {
+            item["id"]: item.get("api_key", "")
+            for item in self._raw_providers()
+            if item.get("id")
+        }
+        cleaned: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for idx, entry in enumerate(raw_list):
+            if not isinstance(entry, dict):
+                raise WebUIError(f"第 {idx + 1} 条提供商不是对象")
+            norm = normalize_provider(entry)
+            if not norm["id"]:
+                raise WebUIError(f"第 {idx + 1} 条提供商缺少 ID")
+            if norm["id"] in seen:
+                raise WebUIError(f"提供商 ID 重复：{norm['id']}")
+            seen.add(norm["id"])
+            if not norm["base_url"] or not norm["model"]:
+                raise WebUIError(f"提供商 {norm['id']} 需要填写 base_url 和 model")
+            if not norm["name"]:
+                norm["name"] = norm["id"]
+            if entry.get("clear_api_key"):
+                norm["api_key"] = ""
+            elif not norm["api_key"]:
+                norm["api_key"] = existing_keys.get(norm["id"], "")
+            cleaned.append(norm)
+
+        image_sec = self._config_raw.get("image")
+        if not isinstance(image_sec, dict):
+            image_sec = {}
+            self._config_raw["image"] = image_sec
+        image_sec["providers"] = cleaned
+        if "default_provider_id" in payload:
+            default_id = str(payload.get("default_provider_id") or "").strip()
+            if default_id and default_id not in seen:
+                raise WebUIError(f"默认提供商 ID 不存在：{default_id}")
+            image_sec["provider_id"] = default_id
+        if "enabled" in payload:
+            image_sec["enabled"] = bool(payload.get("enabled"))
+
+        if self._save_config is not None:
+            try:
+                self._save_config()
+            except Exception as exc:  # noqa: BLE001
+                raise WebUIError(f"配置已生效但写回文件失败：{exc}") from exc
+        return {
+            "ok": True,
+            "providers": self._masked_providers(),
+            "default_provider_id": str(image_sec.get("provider_id") or ""),
+            "enabled": bool(image_sec.get("enabled", False)),
+        }
+
+    async def image_providers_test(self, payload: dict[str, Any]) -> dict[str, Any]:
+        img = self._image()
+        raw = payload.get("provider") if isinstance(payload.get("provider"), dict) else payload
+        norm = normalize_provider(raw)
+        if not norm["api_key"] and norm["id"]:
+            for item in self._raw_providers():
+                if item["id"] == norm["id"]:
+                    norm["api_key"] = item.get("api_key", "")
+                    break
+        return await img.test_provider(norm)
+
+    async def image_test_photo(
+        self, bot_id: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        bot_id = self._require_bot_id(bot_id)
+        img = self._image()
+        scene = str(payload.get("scene") or "").strip()
+        if not scene:
+            raise WebUIError("请输入原始画面描述")
+        include_story: bool | None = None
+        if "include_story" in payload and payload.get("include_story") is not None:
+            include_story = bool(payload.get("include_story"))
+        result = await img.test_photo(
+            bot_id=bot_id,
+            scene=scene,
+            provider_id=str(payload.get("provider_id") or "").strip(),
+            include_story=include_story,
+            recent_chat=str(payload.get("recent_chat") or ""),
+            run_review=bool(payload.get("run_review", False)),
+        )
+        if not result.get("ok"):
+            raise WebUIError(str(result.get("error") or "测试生图失败"))
+        data: bytes = result["data"]
+        mime = str(result.get("mime") or "image/png")
+        ext = str(result.get("ext") or "png")
+        encoded = base64.b64encode(data).decode("ascii")
+        return {
+            "ok": True,
+            "bot_id": bot_id,
+            "data_url": f"data:{mime};base64,{encoded}",
+            "mime": mime,
+            "ext": ext,
+            "filename": f"{_safe(bot_id)}-test-{self.now_fn()}.{ext}",
+            "size": int(result.get("size") or len(data)),
+            "provider_id": result.get("provider_id") or "",
+            "provider_name": result.get("provider_name") or "",
+            "protocol": result.get("protocol") or "",
+            "prompt": result.get("prompt") or "",
+            "aspect_ratio": result.get("aspect_ratio") or "",
+            "refs": result.get("refs") or [],
+            "context_text": result.get("context_text") or "",
+            "review": result.get("review"),
+            "translate_meta": result.get("translate_meta") or {},
+            "latency_ms": int(result.get("latency_ms") or 0),
+        }
 
     # ------------------------------------------------------------------ 文件
     def _require_bot_id(self, bot_id: Any) -> str:

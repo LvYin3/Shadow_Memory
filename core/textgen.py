@@ -70,6 +70,64 @@ class TextClient:
             return text
         return await self._via_direct(system, user, task)
 
+    async def generate_with_images(
+        self,
+        system: str,
+        user: str,
+        images: list[tuple[bytes, str]],
+        *,
+        bot_id: str = "",
+        umo: str = "",
+    ) -> tuple[str | None, bool, str]:
+        """尝试使用同一写作模型带图生成文本；不支持视觉或失败时返回 (None, False, reason)。"""
+        data_uris: list[str] = []
+        for raw, mime in images:
+            if not raw:
+                continue
+            encoded = base64.b64encode(raw).decode("ascii")
+            data_uris.append(f"data:{mime or 'image/png'};base64,{encoded}")
+        if not data_uris:
+            return None, False, "no_images"
+
+        if self._resolver is not None:
+            try:
+                provider = await self._resolver(bot_id, umo)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("解析写作 provider（带图转译）失败：%s", exc)
+                provider = None
+            if provider is not None and hasattr(provider, "text_chat"):
+                try:
+                    response = await provider.text_chat(
+                        prompt=user,
+                        system_prompt=system,
+                        contexts=[],
+                        image_urls=data_uris,
+                    )
+                    text = getattr(response, "completion_text", None)
+                    if text:
+                        self.stats["provider"] += 1
+                        return str(text), True, ""
+                    return None, False, "provider 返回空内容"
+                except Exception as exc:  # noqa: BLE001
+                    self.audit.warn("写作 provider 带图转译失败，将原地降级纯文本：%s", exc)
+                    return None, False, f"模型不支持带图调用或请求失败：{str(exc)[:120]}"
+
+        if self.base_url:
+            text = await self._vision_direct(
+                data_uris,
+                user,
+                system,
+                self.model,
+                max_tokens=self.max_tokens,
+                disable_thinking=False,
+                timeout_s=60.0,
+            )
+            if text:
+                self.stats["direct"] += 1
+                return str(text), True, ""
+            return None, False, "直连写作模型不支持带图调用或请求失败"
+        return None, False, "未配置可用写作模型"
+
     async def complete(self, system: str, user: str, *, thinking: str) -> str | None:
         """直连写作模型，并强制这次开或关思考。没有直连地址时返回 None。"""
         if thinking not in {"enabled", "disabled"}:
@@ -178,6 +236,148 @@ class TextClient:
                 timeout_s,
             )
         return _clean_caption(text, max_chars)
+
+    async def vision_json(
+        self,
+        images: list[tuple[bytes, str]],
+        *,
+        prompt: str,
+        system: str = "",
+        bot_id: str = "",
+        umo: str = "",
+        provider: Any = None,
+        model: str = "",
+        timeout_s: float = 30.0,
+        max_tokens: int = 800,
+        disable_thinking: bool = True,
+    ) -> dict[str, Any] | None:
+        """用视觉模型查看一张或多张图并解析 JSON 对象；失败返回 None。"""
+        data_uris: list[str] = []
+        for raw, mime in images:
+            if not raw:
+                continue
+            encoded = base64.b64encode(raw).decode("ascii")
+            data_uris.append(f"data:{mime or 'image/png'};base64,{encoded}")
+        if not data_uris:
+            return None
+        text = await self._try_describe(
+            self._vision_via_provider(
+                data_uris,
+                prompt,
+                system,
+                bot_id,
+                umo,
+                provider=provider,
+            ),
+            timeout_s,
+        )
+        if not text and provider is None:
+            text = await self._try_describe(
+                self._vision_direct(
+                    data_uris,
+                    prompt,
+                    system,
+                    model,
+                    max_tokens=max_tokens,
+                    disable_thinking=disable_thinking,
+                    timeout_s=timeout_s,
+                ),
+                timeout_s,
+            )
+        if not text:
+            return None
+        value = extract_json(text)
+        if isinstance(value, dict):
+            return value
+        self.audit.warn("视觉审核输出不是 JSON 对象：%s", str(text)[:120])
+        return None
+
+    async def _vision_via_provider(
+        self,
+        data_uris: list[str],
+        prompt: str,
+        system: str,
+        bot_id: str,
+        umo: str,
+        *,
+        provider: Any = None,
+    ) -> str | None:
+        chosen = provider
+        if chosen is None:
+            resolver = self._vision_resolver or self._resolver
+            if resolver is None:
+                return None
+            try:
+                chosen = await resolver(bot_id, umo)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("解析视觉审核 provider 失败：%s", exc)
+                return None
+        if chosen is None:
+            return None
+        try:
+            response = await chosen.text_chat(
+                prompt=prompt,
+                system_prompt=system,
+                contexts=[],
+                image_urls=data_uris,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.audit.warn("视觉审核 provider 调用失败：%s", exc)
+            return None
+        return getattr(response, "completion_text", None)
+
+    async def _vision_direct(
+        self,
+        data_uris: list[str],
+        prompt: str,
+        system: str,
+        model: str,
+        *,
+        max_tokens: int = 800,
+        disable_thinking: bool = True,
+        timeout_s: float = 30.0,
+    ) -> str | None:
+        if not self.base_url:
+            return None
+        url = chat_url(self.base_url)
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for uri in data_uris:
+            content.append({"type": "image_url", "image_url": {"url": uri}})
+        messages: list[dict[str, Any]] = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": content})
+        payload: dict[str, Any] = {
+            "model": (model or self.model),
+            "temperature": 0.2,
+            "max_tokens": max_tokens,
+            "messages": messages,
+        }
+        if disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
+        result = await self.http.post_json(url, payload, headers, timeout_s=max(5.0, float(timeout_s)))
+        if (
+            not result.ok
+            and disable_thinking
+            and result.status in (400, 422)
+        ):
+            payload.pop("thinking", None)
+            result = await self.http.post_json(
+                url, payload, headers, timeout_s=max(5.0, float(timeout_s))
+            )
+        if not result.ok:
+            self.audit.warn(
+                "视觉审核直连失败 status=%s error=%s", result.status, result.error
+            )
+            return None
+        text = _chat_content(result.body)
+        if not text:
+            self.audit.warn("视觉审核直连返回空内容")
+            return None
+        return str(text)
 
     @staticmethod
     async def _try_describe(coro: Awaitable[str | None], timeout_s: float) -> str | None:

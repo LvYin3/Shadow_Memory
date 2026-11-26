@@ -214,8 +214,9 @@ async def replace_world(
     if state:
         await db.execute(
             "INSERT INTO story_state(bot_id, enabled, paused, pause_reason, tokens, tokens_at, "
-            "card, next_wake_at, last_scene_at, failures, world_title, outline, seed_meta, tree, "
-            "created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "card, next_wake_at, last_scene_at, failures, world_title, outline, known_outline, "
+            "seed_meta, tree, created_at, updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 target,
                 int(state.get("enabled") or 0),
@@ -229,6 +230,7 @@ async def replace_world(
                 int(state.get("failures") or 0),
                 state.get("world_title"),
                 state.get("outline"),
+                state.get("known_outline"),
                 state.get("seed_meta"),
                 _rewrite_tree(state.get("tree"), scene_map),
                 int(state.get("created_at") or now),
@@ -239,15 +241,17 @@ async def replace_world(
     for row in world.get("canon") or []:
         if not isinstance(row, dict):
             continue
+        visibility = row.get("visibility") if row.get("visibility") in {"known", "gm_only"} else "gm_only"
         await db.execute(
-            "INSERT INTO story_canon(bot_id, origin, category, name, body, scene_id, created_at) "
-            "VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO story_canon(bot_id, origin, category, name, body, visibility, scene_id, "
+            "created_at) VALUES(?,?,?,?,?,?,?,?)",
             (
                 target,
                 row.get("origin") if row.get("origin") in {"seed", "play"} else "play",
                 row.get("category") or "other",
                 row.get("name") or "",
                 row.get("body") or "",
+                visibility,
                 _scene_id(row.get("scene_id"), scene_map),
                 int(row.get("created_at") or now),
             ),

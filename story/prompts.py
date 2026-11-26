@@ -139,7 +139,7 @@ GM_CLOSE_TASK = """# 任务：收场
 - epilogue：可选的一两句收尾，只写周围的环境和别人的动静（{hint}）；不要让她再做任何动作、说任何话，也不要替她做决定。没有就留空。
 - card：她的状态卡。where 是地点短语；doing 是她这一场结束时正在做、并且会持续一阵的事（不带主语的短语，如“写课程论文”），不要替她做她还没做的决定；minutes 是这件事预计还要持续多少分钟；phone 是这期间看手机“方便”还是“不方便”。
 - next_wake_minutes：多少分钟后再继续故事（{span}）。接下来没有波澜，就等这件事结束再继续；步步都有变化，才短一些。预约得越密，额度花得越快。
-- canon：这一场里新确立、以后要长期保持一致的设定：某个人是谁、某个地方在哪、某样东西是什么、某条规矩。每条 {{"name": "", "category": "人物/地点/组织/规则/物品/其他", "body": ""}}。这一场发生了什么不算设定（那写进 summary）；没有就给空数组。
+- canon：这一场里新确立、以后要长期保持一致的设定：某个人是谁、某个地方在哪、某样东西是什么、某条规矩。每条 {{"name": "", "category": "人物/地点/组织/规则/物品/其他", "body": "", "visibility": "known/gm_only"}}。visibility 可选：只有她在本场直接获知或确立的才标 "known"，暗线、幕后或她不知情的标 "gm_only"（省略默认按 "gm_only" 处理）。这一场发生了什么不算设定（那写进 summary）；没有就给空数组。
 - tree：未了结的线。每条 {{"title": "", "people": [], "canon": [], "seed": [], "scenes": []}}。people 只写配角或设定里的人物。canon 写设定集里的名字，seed 写世界种子里的名字。scenes 写已经演过的场编号；这一场用 0。没有就给空数组。日常节点不用写。
 - summary：给你自己看的本场梗概，用第三人称“她”，不超过 120 字。
 - remote：开场名单里还开着的远方动作，有结果就写 {{"id": 编号, "outcome": "到了/没到/她没管"}}。没碰到、或还没了结的不要写，名字会继续放开。
@@ -178,10 +178,26 @@ def gm_turn_task(*, last: bool) -> str:
     )
 
 
-def gm_close_task(*, min_wake: int, max_wake: int, style: Any = None) -> str:
+def gm_close_task(
+    *,
+    min_wake: int,
+    max_wake: int,
+    style: Any = None,
+    auto_ref_enabled: bool = False,
+) -> str:
     from .link import wake_span
 
-    return GM_CLOSE_TASK.format(span=wake_span(min_wake, max_wake), hint=narration(style).hint)
+    text = GM_CLOSE_TASK.format(
+        span=wake_span(min_wake, max_wake), hint=narration(style).hint
+    )
+    if auto_ref_enabled:
+        text += (
+            "\n- ref_requests（可选数组）：若本场新出现且需要为后续拍照建立参考图的重要人物"
+            "（含新提名配角）、场景或物件，可列 "
+            '[{"category": "person/place/item", "name": "名称", "appearance": "外貌或视觉特征描述"}]；'
+            "最多 3 条，不需要就给空数组。"
+        )
+    return text
 
 
 def gm_open_task(*, first: bool, backfill: bool, style: Any = None) -> str:
@@ -332,19 +348,39 @@ def npc_user(transcript: list[dict[str, Any]], style: Any = None) -> str:
     return (body + "\n\n" if body else "") + "轮到你。只写你这一下。"
 
 
+ACTOR_PHOTO_HINT = (
+    '- 如果想随手拍一张眼前的照片（发给某人、存进自己图片库或发 QQ 空间说说），'
+    '可在 JSON 里加可选字段 "photo": '
+    '{"scene": "想拍的画面描述", "to": "可选接收人显示名", "text": "可选配文", '
+    '"save_media": false, "qzone": false, "qzone_text": "可选说说正文"}；'
+    "不拍就省略或填 null。"
+)
+
+
 def actor_system(
-    *, base_card: str, persona: str, ambient: str, moment: str, style: Any = None
+    *,
+    base_card: str,
+    persona: str,
+    ambient: str,
+    moment: str,
+    style: Any = None,
+    photo_enabled: bool = False,
+    world_brief: str = "",
 ) -> str:
     chosen = narration(style)
+    scene_block = ACTOR_SCENE.format(
+        moment=moment,
+        narrator_line=chosen.actor_line.format(tag=chosen.tag, me=ME_TAG),
+    )
+    if photo_enabled:
+        scene_block = scene_block + "\n" + ACTOR_PHOTO_HINT
     pieces = [
         base_card.strip(),
         persona.strip(),
         ACTOR_MEMORY_NOTE,
+        world_brief.strip(),
         ambient.strip(),
-        ACTOR_SCENE.format(
-            moment=moment,
-            narrator_line=chosen.actor_line.format(tag=chosen.tag, me=ME_TAG),
-        ),
+        scene_block,
     ]
     return "\n\n".join(piece for piece in pieces if piece)
 
@@ -354,10 +390,13 @@ def actor_user(
     recall_parts: list[str],
     style: Any = None,
     brief: str = "",
+    world_block: str = "",
 ) -> str:
     blocks: list[str] = []
     if brief.strip():
         blocks.append(brief.strip())
+    if world_block.strip():
+        blocks.append(world_block.strip())
     cleaned = [part.strip() for part in recall_parts if part and part.strip()]
     if cleaned:
         lines = ["【我的记忆，不是眼前发生的；不用主动提】"]

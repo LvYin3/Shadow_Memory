@@ -379,9 +379,10 @@ provider_ltm_settings.group_message_history_enable: false
 {
   "version": "world_seed/v1",
   "title": "青屿",                  // 可选，≤40 字
-  "outline": "……",                 // 必填，50–3000 字：时代、地点、她的身份与日常、基调、通讯方式
+  "outline": "……",                 // 必填，50–3000 字：时代、地点、她的身份与日常、基调、通讯方式（给背景模型看）
+  "known_outline": "……",           // 可选，≤1000 字：主角第一人称视角的世界常识底稿（不含秘密与导演元规则；留空时导入自动提炼）
   "entries": [                      // 可选，≤200 条；按需检索的设定
-    {"category": "地点", "name": "青屿大学", "body": "……"}   // name ≤40 字，body ≤500 字
+    {"category": "地点", "name": "青屿大学", "body": "……", "visibility": "known"}   // name ≤40 字，body ≤500 字，visibility 可选 known / gm_only
   ],
   "hooks": ["……"],                 // 可选，≤10 条主线钩子，每条 ≤200 字
   "opening": {"where": "合租屋", "doing": "赖床"}   // 可选，第一场的起点
@@ -389,8 +390,10 @@ provider_ltm_settings.group_message_history_enable: false
 ```
 
 - `category` 取 人物 / 地点 / 组织 / 规则 / 物品 / 其他；
-- 种子运行时只读。演出中新确立的事实进「设定集」，只追加，不会改写种子；
-- 重新导入种子会换掉大纲、钩子和种子条目，设定集、主持人笔记、场景和状态卡都不动；
+- `visibility` 取 `known`（角色已知，可流向聊天主对话、故事 Actor 与 `memory_search`）或 `gm_only`（仅背景模型可见，用于底层秘密、主角不知情的档案与导演元规则）；导入未填 `known_outline` 或未标 `visibility` 的旧种子时会自动用写作模型提炼与分类（失败保守落为 `gm_only`），也可随时在 WebUI 故事页手工切换或一键重新提炼；
+- 种子运行时只读。演出中新确立的事实进「设定集」，只追加，不会改写种子；演出新增设定缺省为 `gm_only`（除非 GM 明确标为 `known` 或在 WebUI 放开）；
+- 重新导入种子会换掉大纲、角色常识底稿、钩子和种子条目，设定集（`origin='play'`）、主持人笔记、场景和状态卡都不动；
+- 聊天与故事 Actor 按需检索配置：`story.world_recall_limit`（默认 3）、`story.world_recall_threshold`（默认 0.55）、`story.world_recall_candidates`（默认 16），故事开启或暂停期间生效，关闭后停用；
 - 写种子时请对照她已有的人格和事实（例如她在哪上学），背景模型运行时读不到这些，不会自己对齐；
 - 古风或异世界设定要在大纲里写明「远程通讯」的等价物，否则她没法解释手机那头的人。
 

@@ -275,11 +275,15 @@ def test_clean_canon_and_notes():
         [
             {"name": "便利店老板", "category": "人物", "body": "姓周，话少。"},
             {"name": "便利店老板", "category": "人物", "body": "姓周，话少。"},
+            {"name": "暗巷密门", "category": "地点", "body": "她当场发现了这扇门。", "visibility": "known"},
             {"name": "", "body": "没有名字"},
             "不是对象",
         ]
     )
-    assert canon == [{"category": "person", "name": "便利店老板", "body": "姓周，话少。"}]
+    assert canon == [
+        {"category": "person", "name": "便利店老板", "body": "姓周，话少。", "visibility": "gm_only"},
+        {"category": "place", "name": "暗巷密门", "body": "她当场发现了这扇门。", "visibility": "known"},
+    ]
     notes = world.clean_notes(
         [{"title": "暗线", "body": "室友在瞒着她找工作"}, {"title": "旧伏笔", "body": ""}, {"body": "无标题"}]
     )
@@ -288,6 +292,35 @@ def test_clean_canon_and_notes():
         {"title": "旧伏笔", "body": ""},
     ]
     assert world.clean_canon(None) == [] and world.clean_notes("x") == []
+
+
+def test_validate_seed_known_outline_and_visibility():
+    base = seed()
+    base["known_outline"] = "我住在青屿大学北门外。"
+    base["entries"][0]["visibility"] = "known"
+    base["entries"][1]["visibility"] = "gm_only"
+    parsed = world.validate_seed(base)
+    assert parsed["known_outline"] == "我住在青屿大学北门外。"
+    assert [entry["visibility"] for entry in parsed["entries"]] == ["known", "gm_only"]
+
+    bad = seed()
+    bad["entries"][0]["visibility"] = "invalid_scope"
+    with pytest.raises(world.WorldSeedError, match="visibility"):
+        world.validate_seed(bad)
+
+
+def test_compound_title_search_hits_subterms():
+    entries = [
+        {"category": "other", "name": "时能与宇宙流速", "body": "第四维度时间流动蕴含的能量称为时能。"},
+        {"category": "other", "name": "流光异术与虚刃", "body": "白映风掌握的时术是虚刃，可进行空间切割。"},
+        {"category": "other", "name": "冥蛇族与能力封印", "body": "底层秘密档案。"},
+    ]
+    assert world.split_name_terms("流光异术与虚刃") == ["流光异术与虚刃", "流光异术", "虚刃"]
+    hits_energy = world.search_scored(entries, "你知道时能是什么吗？", 3, min_score=0.45)
+    assert hits_energy and hits_energy[0][1]["name"] == "时能与宇宙流速"
+    hits_blade = world.search_scored(entries, "平时怎么用虚刃切金属？", 3, min_score=0.45)
+    assert hits_blade and hits_blade[0][1]["name"] == "流光异术与虚刃"
+    assert world.search_scored(entries, "今天中午吃什么呀", 3, min_score=0.45) == []
 
 
 # --------------------------------------------------------------------- 转录

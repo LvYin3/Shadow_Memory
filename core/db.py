@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator, Iterable, Sequence
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -336,6 +336,7 @@ CREATE TABLE IF NOT EXISTS story_state (
   failures INTEGER NOT NULL DEFAULT 0,
   world_title TEXT,
   outline TEXT,
+  known_outline TEXT,
   seed_meta TEXT,
   tree TEXT,
   created_at INTEGER NOT NULL,
@@ -370,6 +371,7 @@ CREATE TABLE IF NOT EXISTS story_canon (
   category TEXT NOT NULL DEFAULT 'other',
   name TEXT NOT NULL,
   body TEXT NOT NULL,
+  visibility TEXT NOT NULL DEFAULT 'gm_only',
   scene_id INTEGER,
   created_at INTEGER NOT NULL
 );
@@ -440,6 +442,48 @@ CREATE TABLE IF NOT EXISTS story_npcs (
   updated_at INTEGER NOT NULL,
   UNIQUE (owner_bot_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS image_refs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  category TEXT NOT NULL CHECK (category IN ('style', 'self', 'person', 'place', 'item')),
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  filename TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'upload' CHECK (source IN ('upload', 'auto')),
+  status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'pending')),
+  prompt TEXT,
+  scene_id INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS image_temp (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  prompt TEXT,
+  description TEXT NOT NULL DEFAULT '',
+  size INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS image_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  bot_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  provider_id TEXT,
+  protocol TEXT,
+  ref_count INTEGER NOT NULL DEFAULT 0,
+  retries INTEGER NOT NULL DEFAULT 0,
+  review_status TEXT,
+  status TEXT NOT NULL,
+  error TEXT,
+  latency_ms INTEGER,
+  created_at INTEGER NOT NULL
+);
 """
 
 DDL_INDEXES = """
@@ -480,6 +524,9 @@ CREATE INDEX IF NOT EXISTS idx_story_remotes_bot ON story_remotes(bot_id, status
 CREATE INDEX IF NOT EXISTS idx_story_unreads_bot ON story_unreads(bot_id, id);
 CREATE INDEX IF NOT EXISTS idx_story_sends_bot ON story_sends(bot_id, umo, id);
 CREATE INDEX IF NOT EXISTS idx_story_npcs_owner ON story_npcs(owner_bot_id, status, name);
+CREATE INDEX IF NOT EXISTS idx_image_refs_bot ON image_refs(bot_id, status, category, name);
+CREATE INDEX IF NOT EXISTS idx_image_temp_bot_exp ON image_temp(bot_id, expires_at);
+CREATE INDEX IF NOT EXISTS idx_image_logs_bot_time ON image_logs(bot_id, created_at);
 """
 
 
@@ -676,6 +723,10 @@ class Database:
                 "share_tokens": "REAL NOT NULL DEFAULT 0",
                 "share_tokens_at": "INTEGER NOT NULL DEFAULT 0",
                 "tree": "TEXT",
+                "known_outline": "TEXT",
+            },
+            "story_canon": {
+                "visibility": "TEXT NOT NULL DEFAULT 'gm_only'",
             },
         }
 

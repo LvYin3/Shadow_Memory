@@ -529,3 +529,112 @@ async def test_aiocqhttp_offline_warning_and_empty_exception_send_log(plugin_mai
         assert row["platform_warning"] == ""
     finally:
         await plugin.terminate()
+
+
+async def test_main_chat_world_knowledge_injection_memory_search_and_routes(plugin_main):
+    plugin, context = await make_plugin(
+        plugin_main, {"story": {"enabled": True, "base_card": "她叫白映风。"}}
+    )
+    _, request = plugin_main
+    try:
+        assert ("/shadow_memory/story/classify", ("POST",)) in context.routes
+        assert ("/shadow_memory/story/canon/visibility", ("POST",)) in context.routes
+
+        bot_id = private_event("").get_platform_id()
+        fantasy_seed = {
+            "version": "world_seed/v1",
+            "title": "离光之外",
+            "outline": "这是一个日常水面下流淌着时能的和平世界，白映风驻守青溪县小院作为繁星巡查员。" * 2,
+            "known_outline": "我住在青溪县小院，在江岚大学读大一，了解时能、虚刃与繁星。",
+            "entries": [
+                {
+                    "category": "其他",
+                    "name": "时能与宇宙流速",
+                    "body": "三维空间之外时间流动蕴含的能量称为时能。",
+                    "visibility": "known",
+                },
+                {
+                    "category": "其他",
+                    "name": "流光异术与虚刃",
+                    "body": "白映风掌握的时术是虚刃，用于高精度空间切割。",
+                    "visibility": "known",
+                },
+                {
+                    "category": "其他",
+                    "name": "冥蛇族与能力封印",
+                    "body": "【世界底层秘密档案，白映风本人不知情】她是冥蛇族最后血脉。",
+                    "visibility": "gm_only",
+                },
+            ],
+        }
+        await plugin.story.import_seed(bot_id, fantasy_seed)
+        await plugin.story.enable(bot_id)
+        await plugin.facts.add_manual(bot_id, "她平时喜欢在电脑上剪视频", kind="profile")
+
+        # 1. 主对话 on_llm_request：静态注入常驻底稿 + 临时注入命中的已知条目，严禁泄露 gm_only
+        req = SimpleNamespace(
+            system_prompt="基础人设",
+            contexts=[],
+            extra_user_content_parts=[],
+            prompt="你知不知道时能是什么？",
+        )
+        await plugin.on_llm_request(private_event("你知不知道时能是什么？"), req)
+        assert "# 我知道的这个世界" in req.system_prompt
+        assert "了解时能、虚刃与繁星" in req.system_prompt
+        assert "冥蛇族" not in req.system_prompt
+        assert req.system_prompt.index("# 关于我的记忆") < req.system_prompt.index("# 我知道的这个世界") < req.system_prompt.index("# 我自己这边")
+
+        temp_texts = "\n".join(part.text for part in req.extra_user_content_parts)
+        assert "【我知道的世界常识" in temp_texts
+        assert "三维空间之外时间流动蕴含的能量称为时能" in temp_texts
+        assert "冥蛇族" not in temp_texts
+
+        # 2. memory_search 同时检索已知世界常识与事实，但绝不返回 gm_only
+        ans_energy = await plugin.tool_memory_search(private_event(""), "时能", 5)
+        assert "世界常识" in ans_energy and "时能与宇宙流速" in ans_energy
+        ans_secret = await plugin.tool_memory_search(private_event(""), "冥蛇族", 5)
+        assert ans_secret == "没查到。"
+        ans_fact = await plugin.tool_memory_search(private_event(""), "剪视频", 5)
+        assert "剪视频" in ans_fact
+
+        # 3. 故事暂停时仍生效，关闭后彻底停用
+        await plugin.story.pause(bot_id)
+        req_paused = SimpleNamespace(
+            system_prompt="", contexts=[], extra_user_content_parts=[], prompt="虚刃怎么用？"
+        )
+        await plugin.on_llm_request(private_event("虚刃怎么用？"), req_paused)
+        assert "# 我知道的这个世界" in req_paused.system_prompt
+        assert any("流光异术与虚刃" in part.text for part in req_paused.extra_user_content_parts)
+
+        await plugin.story.disable(bot_id)
+        req_off = SimpleNamespace(
+            system_prompt="", contexts=[], extra_user_content_parts=[], prompt="时能是什么？"
+        )
+        await plugin.on_llm_request(private_event("时能是什么？"), req_off)
+        assert "# 我知道的这个世界" not in req_off.system_prompt
+        assert not any("时能与宇宙流速" in part.text for part in req_off.extra_user_content_parts)
+        assert await plugin.tool_memory_search(private_event(""), "时能", 5) == "没查到。"
+
+        # 4. WebUI 路由切换可见性与重新分类
+        canon = await plugin.story.store.canon(bot_id)
+        blade_id = next(row["id"] for row in canon if row["name"] == "流光异术与虚刃")
+        request.payload = {"bot": bot_id, "id": blade_id, "visibility": "gm_only"}
+        toggled = await plugin.web_story_canon_visibility()
+        assert toggled == {"id": blade_id, "visibility": "gm_only"}
+
+        context.default_provider.outputs = [
+            {
+                "known_outline": "重新提炼的第一人称底稿。",
+                "entries": [
+                    {"name": "时能与宇宙流速", "visibility": "known"},
+                    {"name": "流光异术与虚刃", "visibility": "known"},
+                    {"name": "冥蛇族与能力封印", "visibility": "gm_only"},
+                ],
+            }
+        ]
+        request.payload = {"bot": bot_id}
+        classified = await plugin.web_story_classify()
+        assert classified["known"] == 2 and classified["gm_only"] == 1
+        assert classified["known_outline"] == "重新提炼的第一人称底稿。"
+    finally:
+        await plugin.terminate()

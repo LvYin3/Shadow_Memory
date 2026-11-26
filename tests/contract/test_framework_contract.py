@@ -301,6 +301,50 @@ def test_astrbot_vision_and_modality_contract():
     assert "image_urls" in provider
 
 
+def test_astrbot_config_preserves_image_providers_across_reload(workdir):
+    """AstrBot 重载插件时会按 _conf_schema.json 清理未声明键；image.providers 必须保留。"""
+    import json
+    import sys
+
+    schema = json.loads((PLUGIN / "_conf_schema.json").read_text(encoding="utf-8"))
+    assert schema["image"]["items"]["providers"]["type"] == "list"
+    assert schema["image"]["items"]["providers"]["invisible"] is True
+
+    # 同步核对 AstrBot 的 AstrBotConfig 源码确实保留 type=list 的 schema 项
+    cfg_src = read("astrbot/core/config/astrbot_config.py")
+    assert "check_config_integrity" in cfg_src
+    assert '"list": []' in read("astrbot/core/config/default.py")
+
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    try:
+        from astrbot.core.config.astrbot_config import AstrBotConfig
+    except Exception:  # noqa: BLE001 - 环境缺 AstrBot 依赖时跳过运行时实例化
+        return
+
+    cfg_path = workdir / "shadow_memory_config.json"
+    first = AstrBotConfig(config_path=str(cfg_path), schema=schema)
+    first["image"]["enabled"] = True
+    first["image"]["provider_id"] = "gem1"
+    first["image"]["providers"] = [
+        {
+            "id": "gem1",
+            "name": "Gemini",
+            "protocol": "gemini",
+            "base_url": "https://generativelanguage.googleapis.com",
+            "api_key": "gk-secret",
+            "model": "gemini-2.5-flash-image",
+        }
+    ]
+    first.save_config()
+
+    # 模拟插件重载：再次用同一份 schema 初始化 AstrBotConfig
+    reloaded = AstrBotConfig(config_path=str(cfg_path), schema=schema)
+    assert reloaded["image"]["provider_id"] == "gem1"
+    assert len(reloaded["image"]["providers"]) == 1
+    assert reloaded["image"]["providers"][0]["api_key"] == "gk-secret"
+
+
 def test_memory_modules_do_not_import_astrbot():
     offenders: list[str] = []
     for path in PLUGIN.rglob("*.py"):

@@ -12,6 +12,18 @@ const state = {
   configView: { level: "cards", groupId: "", sectionKey: "" },
   secretEdits: {},
   spoilerConfirmed: false,
+  image: null,
+  imageBot: "",
+  imageView: "manage",
+  imageTestDraft: {
+    scene: "",
+    recentChat: "",
+    providerId: "",
+    includeStory: null,
+    runReview: false,
+  },
+  imageTestResult: null,
+  imageTestBusy: false,
 };
 
 const CONFIG_BLURBS = {
@@ -19,6 +31,7 @@ const CONFIG_BLURBS = {
   memory: "她记得什么、怎么想起来。",
   interaction: "什么时候开口、图片和备忘。",
   story: "聊天之外的那一段生活。",
+  image: "拍照、参考图与视觉审核。",
   logging: "日志留多久。",
   bots: "只对某一个机器人生效的覆盖。",
   other: "还没归进上面几块的项。",
@@ -31,6 +44,7 @@ const CATEGORY_LABELS = {
   insights: "洞察",
   notes: "笔记",
   media: "媒体",
+  image_refs: "参考图",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -211,6 +225,9 @@ async function refreshAll() {
     if (!$("panel-story").classList.contains("hidden")) {
       await loadStory();
     }
+    if (!$("panel-image").classList.contains("hidden")) {
+      await loadImage(state.imageBot);
+    }
     toast("已刷新");
   } catch (error) {
     toast(error.message, true);
@@ -286,7 +303,8 @@ async function previewTransfer() {
   try {
     const data = await apiPost("transfer/preview", body);
     const media = data.media || {};
-    $("preview-result").textContent = `将写入：人格 ${data.counts.persona}，事实 ${data.counts.facts}，事件 ${data.counts.events}，洞察 ${data.counts.insights}，笔记 ${data.counts.notes}；媒体 ${media.files || 0} 个 / ${((media.bytes || 0) / 1048576).toFixed(1)} MB（跳过 ${media.missing || 0}）`;
+    const refs = data.image_refs || {};
+    $("preview-result").textContent = `将写入：人格 ${data.counts.persona}，事实 ${data.counts.facts}，事件 ${data.counts.events}，洞察 ${data.counts.insights}，笔记 ${data.counts.notes}；媒体 ${media.files || 0} 个 / ${((media.bytes || 0) / 1048576).toFixed(1)} MB（跳过 ${media.missing || 0}）；参考图 ${refs.files || 0} 张`;
     if (media.over_limit) toast("媒体超过 100MB / 500 文件，执行会被拒绝", true);
   } catch (error) {
     toast(error.message, true);
@@ -313,7 +331,8 @@ async function runTransfer() {
     $("transfer-run").disabled = true;
     const data = await apiPost("transfer", body);
     const media = data.media || {};
-    toast(`转移完成：人格 ${data.counts.persona}，事实 ${data.counts.facts}，事件 ${data.counts.events}，洞察 ${data.counts.insights}，笔记 ${data.counts.notes}，媒体 ${media.copied || 0}${data.backup ? "；备份 " + data.backup : ""}`);
+    const refs = data.image_refs || {};
+    toast(`转移完成：人格 ${data.counts.persona}，事实 ${data.counts.facts}，事件 ${data.counts.events}，洞察 ${data.counts.insights}，笔记 ${data.counts.notes}，媒体 ${media.copied || 0}，参考图 ${refs.copied || 0}${data.backup ? "；备份 " + data.backup : ""}`);
     $("transfer-dialog").close();
     await loadOverview();
   } catch (error) {
@@ -485,6 +504,20 @@ function renderStory(data) {
       const platformWarn = row.platform_warning
         ? `<p class="warn">暂缓唤醒：${esc(row.platform_warning)}</p>`
         : "";
+      const canRefill =
+        row.enabled &&
+        !row.running &&
+        Number(row.refill_per_day) > 0 &&
+        Number(row.tokens) < Number(row.capacity);
+      const refillTitle = !row.enabled
+        ? "故事还没开启"
+        : row.running
+          ? "正在演这一场，等演完再补"
+          : !(Number(row.refill_per_day) > 0)
+            ? "当前每天回补额度为 0，无法补充"
+            : Number(row.tokens) >= Number(row.capacity)
+              ? "唤醒额度已满"
+              : `立刻增加 ${row.refill_per_day} 次，最多攒 ${row.capacity} 次`;
       return `
       <div class="story-card" data-bot="${esc(row.bot_id)}">
         <div class="story-head">
@@ -500,7 +533,7 @@ function renderStory(data) {
         <div class="story-facts">
           <div><b>世界</b>${row.has_seed ? esc(row.world_title || "（未命名）") : '<span class="warn">还没有导入世界种子</span>'}</div>
           <div><b>人设来源</b>${row.base_card_source ? `${esc(row.base_card_source)}（${row.base_card_chars} 字）` : '<span class="warn">没有取到</span>'}</div>
-          <div><b>唤醒额度</b>${row.tokens} / ${row.capacity}（每天回补 ${row.refill_per_day}）</div>
+          <div><b>唤醒额度</b>${row.tokens} / ${row.capacity}（每天回补 ${row.refill_per_day}）<button class="ghost story-inline-btn" data-story="refill" ${canRefill ? "" : "disabled"} title="${esc(refillTitle)}">补充一天额度</button></div>
           <div><b>下次唤醒</b>${active ? clock(row.next_wake_at) : "—"}</div>
           <div><b>状态卡</b>${card ? esc(card) : '<span class="muted">没有或已过期</span>'}</div>
           <div><b>累计</b>${row.scenes_total} 场 · 设定 ${canon.seed ?? 0}+${canon.play ?? 0} · 笔记 ${row.notes}</div>
@@ -551,7 +584,14 @@ function spoilerHtml(data) {
   const recent = (daily.recent || []).map((item) => `<li>#${item.id} ${esc(item.line || "")}</li>`).join("");
   const older = (daily.older || []).map((id) => `#${id}`).join(" ");
   const canon = (data.canon || [])
-    .map((item) => `<li>${esc(item.origin)} · ${esc(item.name)}：${esc(item.body)}</li>`)
+    .map((item) => {
+      const known = item.visibility === "known";
+      const badge = known ? "角色已知" : "仅 GM";
+      const next = known ? "gm_only" : "known";
+      const action = known ? "藏为仅 GM" : "设为角色已知";
+      return `<li>${esc(item.origin)} · <b>[${badge}]</b> ${esc(item.name)}：${esc(item.body)} `
+        + `<button class="ghost" type="button" data-canon-vis data-canon-id="${item.id}" data-next-vis="${next}">${action}</button></li>`;
+    })
     .join("");
   const seed = data.seed || {};
   const options = (data.categories || [])
@@ -599,18 +639,19 @@ function spoilerHtml(data) {
     <p>日常</p>
     ${recent ? `<ul>${recent}</ul>` : ""}
     ${older ? `<p class="muted">更早：${older}</p>` : ""}
-    <h3>设定集（只读）</h3>
+    <h3>设定集（可切换角色可见性）</h3>
     ${canon ? `<ul>${canon}</ul>` : '<p class="muted">（没有）</p>'}
     <h3>世界种子</h3>
     <label>标题 <input class="seed-title" value="${esc(seed.title || "")}" /></label>
-    <label>大纲 <textarea class="seed-outline">${esc(seed.outline || "")}</textarea></label>
+    <label>大纲（背景模型可见） <textarea class="seed-outline">${esc(seed.outline || "")}</textarea></label>
+    <label>角色已知底稿（聊天与演出里的她可见，留空保存时自动提炼） <textarea class="seed-known-outline">${esc(seed.known_outline || "")}</textarea></label>
     <div class="seed-entries">${entries}</div>
     <button class="ghost" type="button" data-entry-add>加一条设定</button>
     <div class="seed-hooks">${hooks}</div>
     <button class="ghost" type="button" data-hook-add>加一个钩子</button>
     <label>开场地点 <input class="seed-where" value="${esc(opening.where || "")}" /></label>
     <label>开场在做 <input class="seed-doing" value="${esc(opening.doing || "")}" /></label>
-    <p><button data-seed-save>保存世界种子</button></p>
+    <p><button data-seed-save>保存世界种子</button> <button class="ghost" type="button" data-world-classify>自动提炼底稿与分类</button></p>
     ${heavy}`;
 }
 
@@ -620,8 +661,17 @@ function entryRow(options, entry) {
     `value="${selected}"`,
     `value="${selected}" selected`
   );
+  const vis = entry && entry.visibility ? entry.visibility : "";
+  const visOpts = [
+    ["", "自动判定"],
+    ["known", "角色已知"],
+    ["gm_only", "仅 GM"],
+  ]
+    .map(([val, label]) => `<option value="${val}"${vis === val ? " selected" : ""}>${label}</option>`)
+    .join("");
   return `<div class="entry-row">
     <select class="entry-category">${opts}</select>
+    <select class="entry-visibility">${visOpts}</select>
     <input class="entry-name" value="${esc((entry && entry.name) || "")}" />
     <textarea class="entry-body">${esc((entry && entry.body) || "")}</textarea>
     <button class="ghost" type="button" data-row-remove>去掉</button>
@@ -658,16 +708,22 @@ async function loadSpoiler(card, bot) {
 function collectSeed(card) {
   const box = card.querySelector(".story-spoiler");
   const entries = [...box.querySelectorAll(".entry-row")]
-    .map((row) => ({
-      category: row.querySelector(".entry-category").value,
-      name: row.querySelector(".entry-name").value.trim(),
-      body: row.querySelector(".entry-body").value.trim(),
-    }))
+    .map((row) => {
+      const item = {
+        category: row.querySelector(".entry-category").value,
+        name: row.querySelector(".entry-name").value.trim(),
+        body: row.querySelector(".entry-body").value.trim(),
+      };
+      const vis = row.querySelector(".entry-visibility")?.value || "";
+      if (vis) item.visibility = vis;
+      return item;
+    })
     .filter((item) => item.name || item.body);
   const hooks = [...box.querySelectorAll(".hook-text")]
     .map((node) => node.value.trim())
     .filter(Boolean);
-  return {
+  const knownOutline = box.querySelector(".seed-known-outline")?.value.trim() || "";
+  const seed = {
     version: "world_seed/v1",
     title: box.querySelector(".seed-title").value.trim(),
     outline: box.querySelector(".seed-outline").value.trim(),
@@ -678,6 +734,8 @@ function collectSeed(card) {
       doing: box.querySelector(".seed-doing").value.trim(),
     },
   };
+  if (knownOutline) seed.known_outline = knownOutline;
+  return seed;
 }
 
 async function loadStory() {
@@ -694,12 +752,36 @@ const STORY_ACTION_DONE = {
   pause: "故事已暂停",
   resume: "故事继续",
   wake: "开始演了，通常要一两分钟，稍后点刷新看结果",
+  refill: "已补充一天唤醒额度",
 };
 
 async function saveStorySeed(card, bot) {
   try {
-    await apiPost("story/seed", { bot, ...collectSeed(card) });
-    toast("世界种子已换上，下一场才会用");
+    const res = await apiPost("story/seed", { bot, ...collectSeed(card) });
+    const extra = res && res.known != null ? `（角色已知 ${res.known} 条，仅 GM ${res.gm_only} 条）` : "";
+    toast(`世界种子已换上${extra}，下一场才会用`);
+    await loadSpoiler(card, bot);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function classifyStoryWorld(card, bot) {
+  try {
+    const res = await apiPost("story/classify", { bot });
+    toast(`已提炼角色底稿并分类：角色已知 ${res.known} 条，仅 GM ${res.gm_only} 条`);
+    await loadSpoiler(card, bot);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function toggleCanonVisibility(card, bot, btn) {
+  try {
+    const id = Number(btn.dataset.canonId || 0);
+    const visibility = btn.dataset.nextVis || "gm_only";
+    await apiPost("story/canon/visibility", { bot, id, visibility });
+    toast(visibility === "known" ? "已设为角色已知" : "已藏为仅 GM 可见");
     await loadSpoiler(card, bot);
   } catch (error) {
     toast(error.message, true);
@@ -738,8 +820,17 @@ async function deleteStoryNote(card, bot, row) {
 
 async function storyAction(bot, action) {
   try {
-    await apiPost("story/action", { bot, action });
-    toast(STORY_ACTION_DONE[action] || "好了");
+    const data = await apiPost("story/action", { bot, action });
+    if (
+      action === "refill" &&
+      data &&
+      data.before_tokens != null &&
+      data.after_tokens != null
+    ) {
+      toast(`已补充唤醒额度：${data.before_tokens} → ${data.after_tokens}`);
+    } else {
+      toast(STORY_ACTION_DONE[action] || "好了");
+    }
   } catch (error) {
     toast(error.message, true);
   }
@@ -1262,10 +1353,471 @@ function switchTab(name) {
   $("panel-overview").classList.toggle("hidden", name !== "overview");
   $("panel-settings").classList.toggle("hidden", name !== "settings");
   $("panel-story").classList.toggle("hidden", name !== "story");
+  $("panel-image").classList.toggle("hidden", name !== "image");
   $("panel-config").classList.toggle("hidden", name !== "config");
   if (name === "settings") loadSettings();
   if (name === "story") loadStory();
+  if (name === "image") loadImage(state.imageBot);
   if (name === "config") loadConfig();
+}
+
+function providerCardHtml(item, protocols) {
+  const opts = protocols
+    .map(
+      (p) =>
+        `<option value="${esc(p.id)}" ${p.id === item.protocol ? "selected" : ""}>${esc(p.label)}</option>`,
+    )
+    .join("");
+  return `
+    <div class="provider-card" data-provider-row>
+      <label>ID<input type="text" data-pf="id" value="${esc(item.id || "")}" placeholder="如 openai-main" /></label>
+      <label>显示名<input type="text" data-pf="name" value="${esc(item.name || "")}" placeholder="如 GPT Image" /></label>
+      <label>协议<select data-pf="protocol">${opts}</select></label>
+      <label>Base URL<input type="text" data-pf="base_url" value="${esc(item.base_url || "")}" placeholder="https://api.openai.com/v1" /></label>
+      <label>模型名<input type="text" data-pf="model" value="${esc(item.model || "")}" placeholder="gpt-image-1 / gemini-2.5-flash-image" /></label>
+      <label>API Key${item.api_key_set ? "（已设置，留空不改）" : ""}
+        <input type="password" data-pf="api_key" value="" placeholder="${item.api_key_set ? "••••••（留空不改）" : "sk-..."}" autocomplete="off" />
+      </label>
+      <label>尺寸（OpenAI）<input type="text" data-pf="size" value="${esc(item.size || "")}" placeholder="如 1024x1024（可空）" /></label>
+      <label>比例（Gemini）<input type="text" data-pf="aspect_ratio" value="${esc(item.aspect_ratio || "")}" placeholder="如 3:4 / 1:1（可空）" /></label>
+      <label>超时（秒）<input type="number" data-pf="timeout_s" value="${esc(item.timeout_s ?? 60)}" min="5" max="300" /></label>
+      <div class="provider-actions">
+        ${item.api_key_set ? '<label class="check"><input type="checkbox" data-pf="clear_api_key" /> 清除密钥</label>' : ""}
+        <button type="button" class="ghost" data-provider-test>测试连通性</button>
+        <button type="button" class="danger ghost" data-provider-remove>删除</button>
+      </div>
+    </div>`;
+}
+
+function collectProviderRows() {
+  return [...document.querySelectorAll("#image-providers-list [data-provider-row]")].map((row) => ({
+    id: row.querySelector('[data-pf="id"]')?.value.trim() || "",
+    name: row.querySelector('[data-pf="name"]')?.value.trim() || "",
+    protocol: row.querySelector('[data-pf="protocol"]')?.value || "openai_images",
+    base_url: row.querySelector('[data-pf="base_url"]')?.value.trim() || "",
+    model: row.querySelector('[data-pf="model"]')?.value.trim() || "",
+    api_key: row.querySelector('[data-pf="api_key"]')?.value.trim() || "",
+    size: row.querySelector('[data-pf="size"]')?.value.trim() || "",
+    aspect_ratio: row.querySelector('[data-pf="aspect_ratio"]')?.value.trim() || "",
+    timeout_s: Number(row.querySelector('[data-pf="timeout_s"]')?.value || 60),
+    clear_api_key: Boolean(row.querySelector('[data-pf="clear_api_key"]')?.checked),
+  }));
+}
+
+async function hydrateImageThumbs(bot) {
+  const nodes = [...document.querySelectorAll("#image-root img[data-ref-thumb]")];
+  await Promise.all(
+    nodes.map(async (img) => {
+      const id = img.dataset.refThumb;
+      if (!bot || !id) return;
+      try {
+        const res = await apiGet("image/file", { bot, id, inline: "1" });
+        if (res && res.data_url) img.src = res.data_url;
+      } catch {
+        img.alt = "加载失败";
+      }
+    }),
+  );
+}
+
+function downloadDataUrl(dataUrl, filename) {
+  const comma = String(dataUrl || "").indexOf(",");
+  if (comma < 0) return toast("图片数据无效", true);
+  const header = dataUrl.slice(0, comma);
+  const mimeMatch = header.match(/data:([^;]+);base64/i);
+  const mime = mimeMatch ? mimeMatch[1] : "image/png";
+  const binary = atob(dataUrl.slice(comma + 1));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  const blob = new Blob([bytes], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename || "shadow-photo-test.png";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function captureImageTestDraft() {
+  const sceneEl = $("img-test-scene");
+  if (!sceneEl) return;
+  state.imageTestDraft = {
+    scene: sceneEl.value,
+    recentChat: $("img-test-chat")?.value || "",
+    providerId: $("img-test-provider")?.value || "",
+    includeStory: Boolean($("img-test-story")?.checked),
+    runReview: Boolean($("img-test-review")?.checked),
+  };
+}
+
+function renderImageTestPage(data) {
+  const providers = data.providers || [];
+  const draft = state.imageTestDraft;
+  const includeStory =
+    draft.includeStory === null ? Boolean(data.story_enabled) : Boolean(draft.includeStory);
+  const providerOpts = [
+    `<option value="">跟随当前机器人默认（${esc(data.bot_provider_id || data.default_provider_id || "自动第一条")}）</option>`,
+    ...providers.map(
+      (p) =>
+        `<option value="${esc(p.id)}" ${p.id === draft.providerId ? "selected" : ""}>${esc(p.name || p.id)} (${esc(p.protocol)})</option>`,
+    ),
+  ].join("");
+
+  const res = state.imageTestResult;
+  let resultHtml = '<p class="muted">填写画面描述并点击「开始测试生图」后，将在此预览成图并提供下载与转译详情。</p>';
+  if (res) {
+    const refsHtml = (res.refs || []).length
+      ? `<div class="test-ref-tags">${res.refs
+          .map(
+            (r) =>
+              `<span class="chip">${r.role === "style" ? "固定画风" : esc(r.category_label)}：${esc(r.name)}</span>`,
+          )
+          .join("")}</div>`
+      : '<span class="muted">未使用参考图</span>';
+
+    let reviewHtml = "";
+    if (res.review) {
+      const statusMap = { passed: "通过", rejected: "驳回（仅参考，未阻断）", unavailable: "审核模型不可用" };
+      const label = statusMap[res.review.status] || res.review.status;
+      reviewHtml = `
+        <div class="test-review-box">
+          <div><b>视觉审核试跑：</b><span class="chip">${esc(label)}</span></div>
+          ${res.review.reason ? `<div><b>原因：</b>${esc(res.review.reason)}</div>` : ""}
+          ${res.review.fix_hint ? `<div><b>修正建议：</b>${esc(res.review.fix_hint)}</div>` : ""}
+          ${res.review.description ? `<div><b>画面描述：</b>${esc(res.review.description)}</div>` : ""}
+        </div>`;
+    }
+
+    const tmeta = res.translate_meta || {};
+    const translateLabel = tmeta.used_vision
+      ? `带图转译（附带 ${tmeta.ref_count || 0} 张参考图 · 模式 ${tmeta.mode || "-"}）`
+      : tmeta.fallback_reason
+        ? `已降级纯文本（${tmeta.fallback_reason}）`
+        : `纯文本转译（模式 ${tmeta.mode || "off"}）`;
+
+    resultHtml = `
+      <div class="image-test-result">
+        <div class="image-test-preview">
+          <img class="test-preview-img" src="${res.data_url}" alt="测试生图结果" />
+          <div class="row">
+            <button id="img-test-download" type="button">下载图片到电脑</button>
+            <span class="muted">机器人 ${esc(res.bot_id)} ｜ ${esc(res.provider_name || res.provider_id)}（${esc(res.protocol)}）｜ ${res.latency_ms} ms ｜ ${(res.size / 1024).toFixed(1)} KB${res.aspect_ratio ? " ｜ 比例 " + esc(res.aspect_ratio) : ""}</span>
+          </div>
+          <div><b>转译方式：</b><span class="chip">${esc(translateLabel)}</span></div>
+        </div>
+        <div>
+          <b>实际附带参考图</b>
+          ${refsHtml}
+        </div>
+        <div>
+          <b>转译模型生成的生图提示词</b>
+          <pre class="test-code-box">${esc(res.prompt || "")}</pre>
+        </div>
+        ${reviewHtml}
+        <details class="advanced">
+          <summary>查看注入给转译模型的原始上下文（可能含故事设定与主持人笔记，展开可能剧透）</summary>
+          <pre class="test-code-box">${esc(res.context_text || "（空）")}</pre>
+        </details>
+      </div>`;
+  }
+
+  return `
+    <div class="image-section">
+      <div class="image-section-head">
+        <h3>生图测试（调试模式）</h3>
+        <span class="muted">不检查总开关、不扣每日配额、不落盘也不入审核区</span>
+      </div>
+      ${
+        !state.imageBot
+          ? '<p class="muted">请先在顶部选择一个机器人环境。</p>'
+          : `
+        <div class="image-test-form">
+          <label>原始画面描述（模拟主对话模型传给拍照工具的描述）
+            <textarea id="img-test-scene" placeholder="例如：在窗边木桌上拍一杯冒热气的手冲咖啡，窗外是傍晚的海面">${esc(draft.scene)}</textarea>
+          </label>
+          <div class="image-test-options">
+            <label class="inline-field">本次提供商
+              <select id="img-test-provider">${providerOpts}</select>
+            </label>
+            <label class="check"><input id="img-test-story" type="checkbox" ${includeStory ? "checked" : ""} /> 带入故事上下文</label>
+            <label class="check"><input id="img-test-review" type="checkbox" ${draft.runReview ? "checked" : ""} /> 附带试跑一次视觉审核（仅看判定，不阻断不重试）</label>
+          </div>
+          <label>模拟近期聊天内容（可选，用于测试聊天语境指代）
+            <textarea id="img-test-chat" placeholder="留空则不注入模拟聊天；可填如：小明：你现在在喝什么呀">${esc(draft.recentChat)}</textarea>
+          </label>
+          <div class="row">
+            <button id="img-test-run" type="button" ${state.imageTestBusy ? "disabled" : ""}>${state.imageTestBusy ? "转译并生图中..." : "开始测试生图"}</button>
+            ${res ? '<button id="img-test-clear" type="button" class="ghost">清空结果</button>' : ""}
+          </div>
+        </div>`
+      }
+    </div>
+    <div class="image-section">
+      <div class="image-section-head">
+        <h3>测试结果</h3>
+      </div>
+      ${resultHtml}
+    </div>
+  `;
+}
+
+async function runImageTest() {
+  if (!state.imageBot) return toast("请先选择机器人环境", true);
+  captureImageTestDraft();
+  const scene = (state.imageTestDraft.scene || "").trim();
+  if (!scene) return toast("请输入原始画面描述", true);
+  state.imageTestBusy = true;
+  if (state.image) renderImage(state.image);
+  try {
+    const res = await apiPost("image/test", {
+      bot: state.imageBot,
+      scene,
+      provider_id: state.imageTestDraft.providerId || "",
+      include_story: Boolean(state.imageTestDraft.includeStory),
+      recent_chat: state.imageTestDraft.recentChat || "",
+      run_review: Boolean(state.imageTestDraft.runReview),
+    });
+    state.imageTestResult = res;
+    toast(`生图测试完成（${res.latency_ms} ms）`);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    state.imageTestBusy = false;
+    if (state.image) renderImage(state.image);
+  }
+}
+
+function renderImage(data) {
+  state.image = data;
+  state.imageBot = data.bot || "";
+  const botSelect = $("image-bot");
+  const bots = data.bots || [];
+  botSelect.innerHTML = bots.length
+    ? bots
+        .map(
+          (id) =>
+            `<option value="${esc(id)}" ${id === state.imageBot ? "selected" : ""}>${esc(id)}</option>`,
+        )
+        .join("")
+    : '<option value="">（暂无机器人）</option>';
+  const toggleBtn = $("image-view-toggle");
+  if (toggleBtn) {
+    toggleBtn.textContent = state.imageView === "test" ? "← 返回生图管理" : "进入生图测试";
+  }
+  const usage = data.usage || { used: 0, limit: 20 };
+  const pending = data.pending || { total: 0, cap_total: 15, groups: [], full: false };
+  $("image-status").textContent =
+    `全局：${data.enabled ? "已开启" : "已关闭"} ｜ 今日生图：${usage.used} / ${usage.limit || "不限"} ｜ 待审区：${pending.total} / ${pending.cap_total}${pending.full ? "（已满，暂停自动生成）" : ""}`;
+
+  if (state.imageView === "test") {
+    $("image-root").innerHTML = renderImageTestPage(data);
+    return;
+  }
+
+  const protocols = data.protocols || [];
+  const categories = data.categories || [];
+  const providers = data.providers || [];
+  const defaultSelectOpts = [
+    `<option value="">自动（取第一条可用）</option>`,
+    ...providers.map(
+      (p) =>
+        `<option value="${esc(p.id)}" ${p.id === data.default_provider_id ? "selected" : ""}>${esc(p.name || p.id)} (${esc(p.id)})</option>`,
+    ),
+  ].join("");
+
+  const catOptions = categories
+    .map((c) => `<option value="${esc(c.id)}">${esc(c.label)}</option>`)
+    .join("");
+
+  const pendingHtml = !state.imageBot
+    ? '<p class="muted">请先选择机器人。</p>'
+    : !(pending.groups || []).length
+      ? '<p class="muted">待审区是空的。故事收场出现新事物时，自动生成的候选参考图会出现在这里。</p>'
+      : pending.groups
+          .map(
+            (group) => `
+          <div class="pending-group" data-pending-cat="${esc(group.category)}" data-pending-name="${esc(group.name)}" data-pending-desc="${esc(group.description || "")}">
+            <div class="pending-group-head">
+              <div>
+                <b>[${esc(group.category_label)}] ${esc(group.name)}</b>
+                <span class="muted">（候选 ${group.items.length} / ${pending.cap_per_subject || 3}）</span>
+                ${group.description ? `<div class="muted">${esc(group.description)}</div>` : ""}
+              </div>
+              <button type="button" class="ghost" data-pending-regen ${group.items.length >= (pending.cap_per_subject || 3) || pending.full ? "disabled" : ""}>再生成一张</button>
+            </div>
+            <div class="ref-grid">
+              ${group.items
+                .map(
+                  (item) => `
+                <div class="ref-card" data-ref-id="${item.id}">
+                  <img class="ref-thumb" data-ref-thumb="${item.id}" alt="${esc(item.name)}" />
+                  <div class="muted" title="${esc(item.prompt || "")}">${esc((item.prompt || "").slice(0, 80))}${(item.prompt || "").length > 80 ? "..." : ""}</div>
+                  <div class="row">
+                    <button type="button" data-pending-approve="${item.id}">采用此图</button>
+                    <button type="button" class="danger ghost" data-pending-reject="${item.id}">驳回</button>
+                  </div>
+                </div>`,
+                )
+                .join("")}
+            </div>
+          </div>`,
+          )
+          .join("");
+
+  const activeRefs = data.active_refs || [];
+  const activeHtml = !state.imageBot
+    ? '<p class="muted">请先选择机器人。</p>'
+    : !activeRefs.length
+      ? '<p class="muted">暂无正式参考图。可在上方上传画风、角色本人、人物、场景或物件参考图。</p>'
+      : `<div class="ref-grid">${activeRefs
+          .map(
+            (item) => `
+          <div class="ref-card" data-active-ref="${item.id}">
+            <img class="ref-thumb" data-ref-thumb="${item.id}" alt="${esc(item.name)}" />
+            <div><span class="chip">${esc(item.category_label)}</span> <b>${esc(item.name)}</b></div>
+            <input type="text" data-ref-edit-name value="${esc(item.name)}" placeholder="名称" />
+            <input type="text" data-ref-edit-desc value="${esc(item.description || "")}" placeholder="外观与特征说明（供转译模型参考）" />
+            <div class="row">
+              <button type="button" class="ghost" data-ref-save="${item.id}">保存说明</button>
+              <button type="button" class="danger ghost" data-ref-delete="${item.id}">删除</button>
+            </div>
+          </div>`,
+          )
+          .join("")}</div>`;
+
+  $("image-root").innerHTML = `
+    <div class="image-section">
+      <div class="image-section-head">
+        <h3>1. 待审区（${pending.total} / ${pending.cap_total}）</h3>
+        ${pending.full ? '<span class="warn">审核区已满，已暂停自动生成，请先处理</span>' : ""}
+      </div>
+      ${pendingHtml}
+    </div>
+
+    <div class="image-section">
+      <div class="image-section-head">
+        <h3>2. 正式参考图库（${activeRefs.length} 张）</h3>
+      </div>
+      <div class="upload-form">
+        <label>分类<select id="ref-upload-cat">${catOptions}</select></label>
+        <label>名称<input id="ref-upload-name" type="text" placeholder="如：画风1 / 本人常服 / 咖啡馆" /></label>
+        <label>外观特征说明<input id="ref-upload-desc" type="text" placeholder="给转译模型看的视觉要点（可选）" /></label>
+        <label>选择图片<input id="ref-upload-file" type="file" accept="image/png,image/jpeg,image/webp,image/gif" /></label>
+        <button id="ref-upload-btn" type="button" ${!state.imageBot ? "disabled" : ""}>上传参考图</button>
+      </div>
+      ${activeHtml}
+    </div>
+
+    <div class="image-section">
+      <div class="image-section-head">
+        <h3>3. 生图提供商档案（密钥仅存插件配置）</h3>
+        <div class="row">
+          <label class="check"><input id="image-master-enabled" type="checkbox" ${data.enabled ? "checked" : ""} /> 启用生图</label>
+          <button id="image-provider-add" type="button" class="ghost">新增提供商</button>
+          <button id="image-provider-save" type="button">保存提供商配置</button>
+        </div>
+      </div>
+      <div class="row" style="margin-bottom:10px;">
+        <label class="inline-field">默认提供商
+          <select id="image-default-provider">${defaultSelectOpts}</select>
+        </label>
+      </div>
+      <div id="image-providers-list">
+        ${providers.length ? providers.map((p) => providerCardHtml(p, protocols)).join("") : '<p class="muted">还没有配置生图提供商，点「新增提供商」添加 OpenAI / Gemini 生图接口。</p>'}
+      </div>
+    </div>
+  `;
+  void hydrateImageThumbs(state.imageBot);
+}
+
+async function loadImage(bot) {
+  try {
+    const data = await apiGet("image", bot ? { bot } : {});
+    renderImage(data);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("读取图片文件失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function uploadImageRef() {
+  if (!state.imageBot) return toast("请先选择机器人", true);
+  const file = $("ref-upload-file")?.files?.[0];
+  if (!file) return toast("请先选择一张图片", true);
+  try {
+    $("ref-upload-btn").disabled = true;
+    const dataUrl = await readFileAsDataUrl(file);
+    await apiPost("image/ref/upload", {
+      bot: state.imageBot,
+      category: $("ref-upload-cat").value,
+      name: $("ref-upload-name").value.trim(),
+      description: $("ref-upload-desc").value.trim(),
+      data_base64: dataUrl,
+    });
+    toast("参考图已上传");
+    await loadImage(state.imageBot);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    const btn = $("ref-upload-btn");
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function saveImageProviders() {
+  try {
+    const providers = collectProviderRows();
+    await apiPost("image/providers/save", {
+      enabled: Boolean($("image-master-enabled")?.checked),
+      default_provider_id: $("image-default-provider")?.value || "",
+      providers,
+    });
+    toast("生图提供商配置已保存");
+    await loadImage(state.imageBot);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function testImageProvider(row, btn) {
+  const payload = {
+    id: row.querySelector('[data-pf="id"]')?.value.trim() || "",
+    name: row.querySelector('[data-pf="name"]')?.value.trim() || "",
+    protocol: row.querySelector('[data-pf="protocol"]')?.value || "openai_images",
+    base_url: row.querySelector('[data-pf="base_url"]')?.value.trim() || "",
+    model: row.querySelector('[data-pf="model"]')?.value.trim() || "",
+    api_key: row.querySelector('[data-pf="api_key"]')?.value.trim() || "",
+    size: row.querySelector('[data-pf="size"]')?.value.trim() || "",
+    aspect_ratio: row.querySelector('[data-pf="aspect_ratio"]')?.value.trim() || "",
+    timeout_s: Number(row.querySelector('[data-pf="timeout_s"]')?.value || 60),
+  };
+  try {
+    btn.disabled = true;
+    btn.textContent = "测试中...";
+    const res = await apiPost("image/providers/test", { provider: payload });
+    if (res.ok) {
+      toast(`测试成功（${res.latency_ms} ms，${res.mime}，${(res.size / 1024).toFixed(1)} KB）`);
+    } else {
+      toast(`测试失败：${res.error || "未知错误"}`, true);
+    }
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "测试连通性";
+  }
 }
 
 document.addEventListener("click", (event) => {
@@ -1323,6 +1875,15 @@ document.addEventListener("click", (event) => {
       void saveStorySeed(storyCard, bot);
       return;
     }
+    if (target.closest("[data-world-classify]")) {
+      void classifyStoryWorld(storyCard, bot);
+      return;
+    }
+    const visBtn = target.closest("[data-canon-vis]");
+    if (visBtn) {
+      void toggleCanonVisibility(storyCard, bot, visBtn);
+      return;
+    }
     if (target.closest("[data-note-save]")) {
       void saveStoryNote(storyCard, bot, target.closest(".note-row"));
       return;
@@ -1343,6 +1904,146 @@ document.addEventListener("click", (event) => {
   }
   if (target.closest("#rebuild-run")) {
     void runRebuild();
+    return;
+  }
+  if (target.closest("#image-view-toggle")) {
+    if (state.imageView === "test") {
+      captureImageTestDraft();
+      state.imageView = "manage";
+    } else {
+      state.imageView = "test";
+    }
+    if (state.image) renderImage(state.image);
+    return;
+  }
+  if (target.closest("#img-test-run")) {
+    void runImageTest();
+    return;
+  }
+  if (target.closest("#img-test-clear")) {
+    captureImageTestDraft();
+    state.imageTestResult = null;
+    if (state.image) renderImage(state.image);
+    return;
+  }
+  if (target.closest("#img-test-download")) {
+    const res = state.imageTestResult;
+    if (res && res.data_url) {
+      downloadDataUrl(res.data_url, res.filename);
+    }
+    return;
+  }
+  if (target.closest("#ref-upload-btn")) {
+    void uploadImageRef();
+    return;
+  }
+  if (target.closest("#image-provider-add")) {
+    const list = $("image-providers-list");
+    if (list) {
+      const empty = list.querySelector("p.muted");
+      if (empty) empty.remove();
+      list.insertAdjacentHTML(
+        "beforeend",
+        providerCardHtml(
+          { protocol: "openai_images", timeout_s: 60 },
+          state.image?.protocols || [],
+        ),
+      );
+    }
+    return;
+  }
+  if (target.closest("#image-provider-save")) {
+    void saveImageProviders();
+    return;
+  }
+  const testBtn = target.closest("[data-provider-test]");
+  if (testBtn) {
+    const row = testBtn.closest("[data-provider-row]");
+    if (row) void testImageProvider(row, testBtn);
+    return;
+  }
+  if (target.closest("[data-provider-remove]")) {
+    target.closest("[data-provider-row]")?.remove();
+    return;
+  }
+  const approveBtn = target.closest("[data-pending-approve]");
+  if (approveBtn) {
+    const id = Number(approveBtn.dataset.pendingApprove || 0);
+    if (id && state.imageBot) {
+      apiPost("image/pending/approve", { bot: state.imageBot, id })
+        .then(() => {
+          toast("已采用该参考图并清理其余候选");
+          return loadImage(state.imageBot);
+        })
+        .catch((err) => toast(err.message, true));
+    }
+    return;
+  }
+  const rejectBtn = target.closest("[data-pending-reject]");
+  if (rejectBtn) {
+    const id = Number(rejectBtn.dataset.pendingReject || 0);
+    if (id && state.imageBot) {
+      apiPost("image/pending/reject", { bot: state.imageBot, id })
+        .then(() => {
+          toast("已驳回该候选图");
+          return loadImage(state.imageBot);
+        })
+        .catch((err) => toast(err.message, true));
+    }
+    return;
+  }
+  const regenBtn = target.closest("[data-pending-regen]");
+  if (regenBtn && !regenBtn.disabled) {
+    const group = regenBtn.closest(".pending-group");
+    if (group && state.imageBot) {
+      regenBtn.disabled = true;
+      apiPost("image/pending/regenerate", {
+        bot: state.imageBot,
+        category: group.dataset.pendingCat,
+        name: group.dataset.pendingName,
+        description: group.dataset.pendingDesc,
+      })
+        .then(() => {
+          toast("已生成一张新候选参考图");
+          return loadImage(state.imageBot);
+        })
+        .catch((err) => toast(err.message, true))
+        .finally(() => {
+          regenBtn.disabled = false;
+        });
+    }
+    return;
+  }
+  const refSaveBtn = target.closest("[data-ref-save]");
+  if (refSaveBtn) {
+    const card = refSaveBtn.closest("[data-active-ref]");
+    const id = Number(refSaveBtn.dataset.refSave || 0);
+    if (card && id && state.imageBot) {
+      apiPost("image/ref/update", {
+        bot: state.imageBot,
+        id,
+        name: card.querySelector("[data-ref-edit-name]")?.value.trim() || "",
+        description: card.querySelector("[data-ref-edit-desc]")?.value.trim() || "",
+      })
+        .then(() => {
+          toast("参考图信息已更新");
+          return loadImage(state.imageBot);
+        })
+        .catch((err) => toast(err.message, true));
+    }
+    return;
+  }
+  const refDelBtn = target.closest("[data-ref-delete]");
+  if (refDelBtn) {
+    const id = Number(refDelBtn.dataset.refDelete || 0);
+    if (id && state.imageBot && window.confirm("确定删除这张参考图吗？")) {
+      apiPost("image/ref/delete", { bot: state.imageBot, id })
+        .then(() => {
+          toast("参考图已删除");
+          return loadImage(state.imageBot);
+        })
+        .catch((err) => toast(err.message, true));
+    }
   }
 });
 
@@ -1366,6 +2067,13 @@ async function boot() {
   $("import-run").addEventListener("click", runImport);
   $("import-cancel").addEventListener("click", () => $("import-dialog").close());
   $("transfer-target").addEventListener("change", toggleConfirm);
+  $("image-bot").addEventListener("change", (event) => {
+    if (state.imageView === "test") {
+      captureImageTestDraft();
+      state.imageTestDraft.includeStory = null;
+    }
+    void loadImage(event.target.value);
+  });
   document.querySelectorAll('input[name="mode"]').forEach((node) => {
     node.addEventListener("change", toggleConfirm);
   });

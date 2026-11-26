@@ -20,6 +20,7 @@
     <nav class="tabs">
       <button class="tab active" data-tab="overview">概览</button>
       <button class="tab" data-tab="story">故事</button>
+      <button class="tab" data-tab="image">生图</button>
       <button class="tab" data-tab="config">配置</button>
       <button class="tab" data-tab="settings">设置</button>
     </nav>
@@ -39,6 +40,21 @@
           <p id="story-master" class="muted"></p>
         </div>
         <div id="story-list" class="settings-list"></div>
+      </section>
+
+      <section id="panel-image" class="panel hidden">
+        <div class="settings-head">
+          <h2>生图：参考图库、审核区与提供商</h2>
+          <p class="muted">按机器人管理画风/角色/场景/物件参考图与待审候选；生图提供商档案（含密钥）仅保存在插件配置，不写入记忆数据库。</p>
+          <div class="row image-toolbar">
+            <label class="inline-field">机器人
+              <select id="image-bot"></select>
+            </label>
+            <button id="image-view-toggle" type="button" class="ghost">进入生图测试</button>
+            <span id="image-status" class="muted"></span>
+          </div>
+        </div>
+        <div id="image-root"></div>
       </section>
 
       <section id="panel-config" class="panel hidden">

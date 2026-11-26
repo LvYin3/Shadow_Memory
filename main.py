@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from collections import OrderedDict
 from pathlib import Path
@@ -82,11 +83,17 @@ from .memory.seed import SeedError, SeedService
 from .memory.segmenter import Segmenter
 from .memory.service import MemoryService
 from .memory.transfer import TransferError, TransferService
+from .imaging.pipeline import PhotoPipeline
+from .imaging.providers import ImageProviderClient
+from .imaging.ref_transfer import RefTransfer
+from .imaging.refs import RefStore
+from .imaging.service import ImageService
+from .imaging.temp import PhotoTempStore
 from .story.director import Director
 from .story.llm import ROLE_GM, StoryLLM
 from .story.service import StoryError, StoryService
 from .story.store import StoryStore
-from .story.world import WorldSeedError
+from .story.world import CATEGORY_LABELS, WorldSeedError
 from .webui.config_form import FormError, apply as apply_config
 from .webui.config_form import describe as describe_config
 from .webui.config_form import load_schema, present as present_config
@@ -123,6 +130,9 @@ class Main(Star):
         self.session_buffer: SessionBuffer | None = None
         self.webui: WebUIService | None = None
         self.story: StoryService | None = None
+        self.image: ImageService | None = None
+        self.image_refs: RefStore | None = None
+        self.image_temp: PhotoTempStore | None = None
         self.audit = Audit(
             logger,
             debug=ConfigView(self.astrbot_config, "").bool("logging.debug", False),
@@ -134,6 +144,7 @@ class Main(Star):
         self._qzone_active: bool | None = None
         self._media_active: bool | None = None
         self._send_image_active: bool | None = None
+        self._take_photo_active: bool | None = None
         self._tool_use_warned: set[str] = set()
         self._decision_contexts: OrderedDict[str, dict[str, Any]] = OrderedDict()
         # 在 __init__ 就注册，避免 initialize 失败/未重载时页面能打开但接口 404。
@@ -261,13 +272,48 @@ class Main(Star):
         self.memos = MemoService(
             db, audit, scheduler=self._schedule_memo, deleter=self._delete_job
         )
-        self.qzone = QzoneService(db, configs, self._media_dir, audit)
+        story_store = StoryStore(db)
+        self.image_refs = RefStore(db, configs, self.data_dir)
+        self.image_temp = PhotoTempStore(db, configs, self.data_dir)
+        image_client = ImageProviderClient(http, audit)
+        image_pipeline = PhotoPipeline(
+            db=db,
+            configs=configs,
+            refs=self.image_refs,
+            client=image_client,
+            prompt_text=self._image_prompt_text,
+            prompt_vision=self._image_prompt_vision,
+            review_vision=self._image_review_vision,
+            audit=audit,
+            story_store=story_store,
+            base_card=self._resolve_base_card,
+        )
+        self.image = ImageService(
+            db=db,
+            configs=configs,
+            refs=self.image_refs,
+            temp=self.image_temp,
+            client=image_client,
+            pipeline=image_pipeline,
+            audit=audit,
+        )
+        self.qzone = QzoneService(
+            db, configs, self._media_dir, audit, photo_resolver=self.image_temp.read
+        )
         self.media_lib = MediaService(
-            db, configs, self._media_dir, http, audit, captioner=textgen.describe_image
+            db,
+            configs,
+            self._media_dir,
+            http,
+            audit,
+            captioner=textgen.describe_image,
+            photo_resolver=self.image_temp.read,
         )
         media_transfer = MediaTransfer(db, self.media_lib, self.data_dir)
-        transfer = TransferService(db, configs, persona, edges, media_transfer, audit)
-        story_store = StoryStore(db)
+        ref_transfer = RefTransfer(db, self.image_refs, self.data_dir)
+        transfer = TransferService(
+            db, configs, persona, edges, media_transfer, audit, ref_transfer=ref_transfer
+        )
         async def story_direct(system: str, user: str) -> str | None:
             return await textgen.complete(system, user, thinking="enabled")
 
@@ -289,6 +335,11 @@ class Main(Star):
                 base_card=self._resolve_base_card,
                 send_text=self._story_send,
                 search_tools=self._story_web_search,
+                image_service=self.image,
+                send_photo=self._story_send_photo,
+                save_photo_media=self.media_lib.save_raw,
+                post_qzone_photo=self._story_post_qzone,
+                spawn_bg=self._spawn_bg_task,
             ),
             llm=story_llm,
             audit=audit,
@@ -308,6 +359,9 @@ class Main(Star):
             tts_providers=self._list_tts_providers,
             platform_ids=self._list_platform_ids,
             story=self.story,
+            image=self.image,
+            config_raw=self.astrbot_config,
+            save_config=self._save_astrbot_config,
         )
 
     # ------------------------------------------------------------------ WebUI
@@ -406,8 +460,21 @@ class Main(Star):
             ("story/action", self.web_story_action, ["POST"], "story action"),
             ("story/spoiler", self.web_story_spoiler, ["GET"], "story spoiler"),
             ("story/seed", self.web_story_seed, ["POST"], "replace world seed"),
+            ("story/classify", self.web_story_classify, ["POST"], "classify world seed"),
+            ("story/canon/visibility", self.web_story_canon_visibility, ["POST"], "set canon visibility"),
             ("story/note", self.web_story_note, ["POST"], "save story note"),
             ("story/note/delete", self.web_story_note_delete, ["POST"], "delete story note"),
+            ("image", self.web_image_overview, ["GET"], "image overview"),
+            ("image/file", self.web_image_file, ["GET"], "image ref file"),
+            ("image/ref/upload", self.web_image_ref_upload, ["POST"], "upload image ref"),
+            ("image/ref/update", self.web_image_ref_update, ["POST"], "update image ref"),
+            ("image/ref/delete", self.web_image_ref_delete, ["POST"], "delete image ref"),
+            ("image/pending/approve", self.web_image_pending_approve, ["POST"], "approve pending ref"),
+            ("image/pending/reject", self.web_image_pending_reject, ["POST"], "reject pending ref"),
+            ("image/pending/regenerate", self.web_image_pending_regenerate, ["POST"], "regenerate pending ref"),
+            ("image/providers/save", self.web_image_providers_save, ["POST"], "save image providers"),
+            ("image/providers/test", self.web_image_providers_test, ["POST"], "test image provider"),
+            ("image/test", self.web_image_test, ["POST"], "test image generation"),
             ("config", self.web_config_get, ["GET"], "plugin config"),
             ("config", self.web_config_save, ["POST"], "save plugin config"),
         ]
@@ -621,6 +688,7 @@ class Main(Star):
             self.audit.warn("配置已在本次运行生效，但写回文件失败：%s", exc)
             return error_response(f"配置已在本次运行生效，但没能写回文件：{exc}", status_code=500)
         self.audit.event("config_saved")
+        await self._refresh_media_tools()
         return json_response({"ok": True, "values": present_config(load_schema(), self.astrbot_config)})
 
     async def web_story(self):
@@ -679,6 +747,40 @@ class Main(Star):
         except Exception as exc:  # noqa: BLE001
             return self._web_error(exc)
 
+    async def web_story_classify(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.story_classify(str(payload.get("bot") or ""))
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_story_canon_visibility(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.story_set_canon_visibility(
+                    str(payload.get("bot") or ""),
+                    int(payload.get("id") or 0),
+                    str(payload.get("visibility") or ""),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
     async def web_story_note(self):
         if not self._web_user():
             return error_response("未登录", status_code=401)
@@ -720,6 +822,187 @@ class Main(Star):
             raise
         except Exception as exc:  # noqa: BLE001 - 失败已记在场景记录里
             self.audit.warn("手动唤醒故事失败 %s：%s", bot_id, exc)
+
+    def _save_astrbot_config(self) -> None:
+        save = getattr(self.astrbot_config, "save_config", None)
+        if callable(save):
+            save()
+
+    async def web_image_overview(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        try:
+            return json_response(
+                await self.webui.image_overview(str(request.query.get("bot", "") or ""))
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_file(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        bot = str(request.query.get("bot", "") or "")
+        ref_id = int(request.query.get("id", "0") or 0)
+        try:
+            if str(request.query.get("inline", "") or "") in {"1", "true"}:
+                return json_response(await self.webui.image_ref_data_url(bot, ref_id))
+            path, filename, mime = await self.webui.image_ref_file(bot, ref_id)
+            return file_response(path, filename=filename, content_type=mime)
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_ref_upload(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        raw = await request.body()
+        if len(raw) > 20 * 1024 * 1024:
+            return error_response("上传内容过大", status_code=413)
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            return error_response("不是合法的 JSON 请求", status_code=400)
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.image_ref_upload(str(payload.get("bot") or ""), payload)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_ref_update(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.image_ref_update(str(payload.get("bot") or ""), payload)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_ref_delete(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.image_ref_delete(
+                    str(payload.get("bot") or ""), int(payload.get("id") or 0)
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_pending_approve(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.image_pending_approve(
+                    str(payload.get("bot") or ""),
+                    int(payload.get("id") or 0),
+                    description=payload.get("description"),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_pending_reject(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.image_pending_reject(
+                    str(payload.get("bot") or ""), int(payload.get("id") or 0)
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_pending_regenerate(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.image_pending_regenerate(
+                    str(payload.get("bot") or ""), payload
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_providers_save(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            result = await self.webui.image_providers_save(payload)
+            await self._refresh_media_tools()
+            return json_response(result)
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_providers_test(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(await self.webui.image_providers_test(payload))
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
+
+    async def web_image_test(self):
+        if not self._web_user():
+            return error_response("未登录", status_code=401)
+        if self.webui is None:
+            return error_response("插件还没准备好", status_code=503)
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象", status_code=400)
+        try:
+            return json_response(
+                await self.webui.image_test_photo(str(payload.get("bot") or ""), payload)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return self._web_error(exc)
 
     # ------------------------------------------------------------------ 作业
     async def _register_jobs(self) -> None:
@@ -842,6 +1125,8 @@ class Main(Star):
             try:
                 if self.memory is not None:
                     await self.memory.close_idle()
+                if self.image is not None:
+                    await self.image.cleanup_temp()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -1309,6 +1594,34 @@ class Main(Star):
             self.audit.warn("读取故事状态卡失败：%s", exc)
             return []
 
+    async def _world_system_block(self, bot_id: str) -> str:
+        """故事模块给聊天侧的静态世界常识底稿；没开或无内容就返回空串。"""
+        if self.story is None:
+            return ""
+        try:
+            return await self.story.world_system_block(bot_id, include_tool_hint=True)
+        except Exception as exc:  # noqa: BLE001 - 世界底稿读不到不能打断对话
+            self.audit.warn("读取世界常识底稿失败：%s", exc)
+            return ""
+
+    async def _world_turn_block(
+        self,
+        bot_id: str,
+        query: str,
+        recent: list[str],
+        decision_context: dict[str, Any] | None = None,
+    ) -> tuple[str, Any]:
+        """故事模块给聊天侧的当轮按需设定条目；失败静默退回空串。"""
+        if self.story is None or not (query or "").strip():
+            return "", None
+        try:
+            return await self.story.world_turn_block(
+                bot_id, query, recent, decision_context=decision_context
+            )
+        except Exception as exc:  # noqa: BLE001 - 设定检索异常不能打断对话
+            self.audit.warn("世界常识按需检索失败：%s", exc)
+            return "", None
+
     def _ltm_settings(self, umo: str) -> dict[str, Any]:
         try:
             config = self.context.get_config(umo=umo) or {}
@@ -1440,16 +1753,41 @@ class Main(Star):
         )
         if not cfg.bool("memory.enabled", True):
             self.audit.debug("persona_inject_skip", bot_id=bot_id, reason="memory_disabled")
+            world_sys = await self._world_system_block(bot_id)
+            if world_sys and world_sys not in (getattr(req, "system_prompt", "") or ""):
+                self._append_system(req, world_sys)
+            query = (event.message_str or "").strip() or str(getattr(req, "prompt", "") or "").strip()
+            if query:
+                world_turn, _ = await self._world_turn_block(
+                    bot_id, query, self._context_texts(req), decision_context
+                )
+                if world_turn:
+                    extra_parts = getattr(req, "extra_user_content_parts", None)
+                    if not isinstance(extra_parts, list):
+                        extra_parts = []
+                        req.extra_user_content_parts = extra_parts
+                    extra_parts.append(TextPart(text="\n\n" + world_turn).mark_as_temp())
             return
         query = (event.message_str or "").strip() or str(getattr(req, "prompt", "") or "").strip()
         if not query:
             self.audit.debug("persona_inject_skip", bot_id=bot_id, reason="empty_query")
+            world_sys = await self._world_system_block(bot_id)
+            if world_sys and world_sys not in (getattr(req, "system_prompt", "") or ""):
+                self._append_system(req, world_sys)
             return
         veto = await self._recall_veto(bot_id, umo, query)
         recent = self._context_texts(req)
-        prepared = await self.memory.prepare_turn(
-            bot_id, umo, query, recent, veto_reason=veto,
-            decision_context=decision_context,
+        prepared, world_sys, (world_turn, world_recall) = await asyncio.gather(
+            self.memory.prepare_turn(
+                bot_id,
+                umo,
+                query,
+                recent,
+                veto_reason=veto,
+                decision_context=decision_context,
+            ),
+            self._world_system_block(bot_id),
+            self._world_turn_block(bot_id, query, recent, decision_context),
         )
         block = prepared.persona_text.strip()
         mode = cfg.str("persona.mode", "append")
@@ -1507,6 +1845,15 @@ class Main(Star):
             self.audit.debug(
                 "persona_inject_skip", bot_id=bot_id, reason="empty_persona"
             )
+        if world_sys:
+            current = getattr(req, "system_prompt", "") or ""
+            if world_sys not in current:
+                self._append_system(req, world_sys)
+                self.audit.debug(
+                    "world_brief_injected",
+                    bot_id=bot_id,
+                    chars=len(world_sys),
+                )
         ambient_text = prepared.ambient_text.strip()
         if ambient_text:
             current = getattr(req, "system_prompt", "") or ""
@@ -1543,6 +1890,19 @@ class Main(Star):
             )
         else:
             self.audit.debug("recall_inject_skip", bot_id=bot_id, reason="no_parts")
+        if world_turn:
+            extra_parts = getattr(req, "extra_user_content_parts", None)
+            if not isinstance(extra_parts, list):
+                extra_parts = []
+                req.extra_user_content_parts = extra_parts
+            extra_parts.append(TextPart(text="\n\n" + world_turn).mark_as_temp())
+            self.audit.debug(
+                "world_canon_inject",
+                bot_id=bot_id,
+                count=len(getattr(world_recall, "entries", []) or []),
+                reason=getattr(world_recall, "reason", ""),
+                chars=len(world_turn),
+            )
         self.audit.debug(
             "persona_inject_done",
             bot_id=bot_id,
@@ -1882,11 +2242,13 @@ class Main(Star):
                 "qzone": has_third_party and config.bool("interaction.qzone.enabled", True),
                 "media": config.bool("interaction.media.enabled", True),
                 "send_image": config.bool("interaction.send_image.enabled", True),
+                "take_photo": config.bool("image.enabled", False),
             }
             states = {
                 "qzone": "_qzone_active",
                 "media": "_media_active",
                 "send_image": "_send_image_active",
+                "take_photo": "_take_photo_active",
             }
             for name, want in targets.items():
                 current = getattr(self, states[name])
@@ -2072,6 +2434,169 @@ class Main(Star):
 
     async def _story_send(self, umo: str, text: str) -> bool:
         return await self._send_to(umo, MessageChain(chain=[Plain(text)]))
+
+    async def _story_send_photo(self, umo: str, data: bytes, caption: str = "") -> bool:
+        parts: list[Any] = [Image.fromBytes(data)]
+        if caption and caption.strip():
+            parts.append(Plain(caption.strip()))
+        return await self._send_to(umo, MessageChain(chain=parts))
+
+    async def _story_post_qzone(
+        self, *, bot_id: str, text: str, images: list[str] | None = None
+    ) -> dict[str, Any]:
+        if self.qzone is None:
+            return {"ok": False, "message": "空间不可用。"}
+        _, inst = self._find_platform_inst(bot_id)
+        if inst is None:
+            return {"ok": False, "message": "平台适配器未加载。"}
+        try:
+            meta_name = str(getattr(inst.meta(), "name", "") or "").lower()
+        except Exception:  # noqa: BLE001
+            meta_name = ""
+        if meta_name not in {"aiocqhttp", "napcat"}:
+            return {"ok": False, "message": "这个平台发不了说说。"}
+        return await self.qzone.post_via_bot(
+            getattr(inst, "bot", None),
+            bot_id=bot_id,
+            text=text,
+            images=images or [],
+        )
+
+    def _spawn_bg_task(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _image_prompt_text(
+        self, bot_id: str, umo: str, system: str, user: str
+    ) -> str | None:
+        """提示词转译模型解析：image.prompt_provider_id → story.provider_id → text 写作模型。"""
+        cfg = self.cfg(bot_id)
+        explicit = cfg.str("image.prompt_provider_id", "").strip()
+        candidate_ids: list[str] = []
+        if explicit:
+            candidate_ids.append(explicit)
+        elif cfg.bool("story.enabled", False):
+            story_pid = cfg.str("story.provider_id", "").strip()
+            if story_pid:
+                candidate_ids.append(story_pid)
+
+        for pid in candidate_ids:
+            try:
+                provider = self.context.get_provider_by_id(pid)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("解析生图转译 provider 失败（%s）：%s", pid, exc)
+                provider = None
+            if provider is not None and hasattr(provider, "text_chat"):
+                try:
+                    resp = await provider.text_chat(
+                        prompt=user, system_prompt=system, contexts=[]
+                    )
+                    text = getattr(resp, "completion_text", None)
+                    if text:
+                        return str(text)
+                except Exception as exc:  # noqa: BLE001
+                    self.audit.warn("生图转译 provider 调用失败（%s）：%s", pid, exc)
+            elif explicit:
+                self.audit.warn("生图转译 provider 不可用：%s", pid)
+                return None
+
+        if self.textgen is None:
+            return None
+        return await self.textgen.generate(system, user, bot_id=bot_id, umo=umo)
+
+    async def _image_prompt_vision(
+        self,
+        bot_id: str,
+        umo: str,
+        system: str,
+        user: str,
+        images: list[tuple[bytes, str]],
+    ) -> tuple[str | None, bool, str]:
+        """同一转译模型尝试带参考图调用；不支持视觉时返回 (None, False, reason) 由上层原地降级纯文本。"""
+        data_uris: list[str] = []
+        for raw, mime in images:
+            if not raw:
+                continue
+            encoded = base64.b64encode(raw).decode("ascii")
+            data_uris.append(f"data:{mime or 'image/png'};base64,{encoded}")
+        if not data_uris:
+            return None, False, ""
+
+        cfg = self.cfg(bot_id)
+        explicit = cfg.str("image.prompt_provider_id", "").strip()
+        target_pid = explicit
+        if not target_pid and cfg.bool("story.enabled", False):
+            target_pid = cfg.str("story.provider_id", "").strip()
+
+        if target_pid:
+            try:
+                provider = self.context.get_provider_by_id(target_pid)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("解析生图带图转译 provider 失败（%s）：%s", target_pid, exc)
+                return None, False, f"解析转译 provider 失败（{target_pid}）"
+            if provider is None or not hasattr(provider, "text_chat"):
+                return None, False, f"转译 provider 不可用（{target_pid}）"
+            try:
+                resp = await provider.text_chat(
+                    prompt=user,
+                    system_prompt=system,
+                    contexts=[],
+                    image_urls=data_uris,
+                )
+                text = getattr(resp, "completion_text", None)
+                if text:
+                    return str(text), True, ""
+                return None, False, f"转译模型（{target_pid}）带图返回空内容"
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn(
+                    "生图转译 provider（%s）不支持带图或调用失败，已原地降级纯文本（如需带图转译可在 image.prompt_provider_id 配置多模态模型）：%s",
+                    target_pid,
+                    exc,
+                )
+                return None, False, f"模型 {target_pid} 不支持视觉或调用失败，已降级纯文本"
+
+        if self.textgen is None:
+            return None, False, "未配置可用写作模型"
+        return await self.textgen.generate_with_images(
+            system, user, images, bot_id=bot_id, umo=umo
+        )
+
+    async def _image_review_vision(
+        self,
+        bot_id: str,
+        umo: str,
+        images: list[tuple[bytes, str]],
+        system: str,
+        user: str,
+    ) -> dict[str, Any] | None:
+        """视觉审核模型解析：image.review_provider_id → 现有 vision 配置。"""
+        if self.textgen is None:
+            return None
+        cfg = self.cfg(bot_id)
+        explicit = cfg.str("image.review_provider_id", "").strip()
+        provider = None
+        if explicit:
+            try:
+                provider = self.context.get_provider_by_id(explicit)
+            except Exception as exc:  # noqa: BLE001
+                self.audit.warn("解析视觉审核 provider 失败（%s）：%s", explicit, exc)
+                return None
+            if provider is None or not hasattr(provider, "text_chat"):
+                self.audit.warn("视觉审核 provider 不可用：%s", explicit)
+                return None
+        return await self.textgen.vision_json(
+            images,
+            prompt=user,
+            system=system,
+            bot_id=bot_id,
+            umo=umo,
+            provider=provider,
+            model=cfg.str("vision.model", "deepseek-flash"),
+            timeout_s=float(cfg.int("vision.timeout_s", 20, lo=5, hi=120)),
+            max_tokens=cfg.int("vision.max_tokens", 800, lo=200, hi=4000),
+            disable_thinking=cfg.bool("vision.disable_thinking", True),
+        )
 
     async def _maybe_story_remote(self, event: AstrMessageEvent) -> None:
         if self.story is None:
@@ -2504,7 +3029,7 @@ class Main(Star):
         Args:
             action(string): post 发说说 / images 看图片目录
             text(string): 说说正文，像随手发的一条
-            images(array): 图片，可以是 http(s) 链接、event:1 这样的本轮图片，或图片目录里的文件名
+            images(array): 图片，可以是 http(s) 链接、event:1、刚拍的照片 photo:...，或图片目录里的文件名
             ugc_right(number): 可见范围 1 所有人 / 4 好友 / 64 仅自己
         """
         if self.qzone is None:
@@ -2543,7 +3068,7 @@ class Main(Star):
 
         Args:
             action(string): save 存一张图 / list 最近存的 / search 按印象找 / delete 删一张
-            source(string): save 用；event:1 表示这条消息里的第 1 张图，或 http(s) 链接
+            source(string): save 用；event:1 表示这条消息里的第 1 张图，photo:... 表示刚拍的照片，或 http(s) 链接
             name(string): save 用；可选名字提示，作为文件名前缀
             description(string): save 用；你看得到这张图就写你看到的；看不到就留空，插件会自己看图补一句
             tags(array): save 用；几个关键词
@@ -2592,7 +3117,7 @@ class Main(Star):
         """发一张图片。可以带一句话，像把照片递过去那样。
 
         Args:
-            source(string): 要发的图：event:1 / 图片库文件名 / http(s) 链接
+            source(string): 要发的图：event:1 / 刚拍的照片 photo:... / 图片库文件名 / http(s) 链接
             caption(string): 可选，和图片一起发的一句话
             session(string): 可选；只在备忘录提醒轮次使用，目标必须来自会话目录
         """
@@ -2626,6 +3151,33 @@ class Main(Star):
             await self.media_lib.log_send(bot_id, filename, "rejected", result)
         return result
 
+    @filter.llm_tool("take_photo")
+    async def tool_take_photo(self, event: AstrMessageEvent, scene: str) -> str:
+        """用手机随手拍一张眼前或身边此刻的照片。拍完后会返回一个 photo:... 引用，你可以再决定是否发给对方、存进图片库或发 QQ 空间。
+
+        Args:
+            scene(string): 用自然语言描述想拍的画面（在哪拍、拍什么、人物姿态与大致构图）
+        """
+        if self.image is None:
+            return "现在拍不了照。"
+        bot_id = event.get_platform_id()
+        cfg = self.cfg(bot_id)
+        if not cfg.bool("image.enabled", False):
+            return "现在没开拍照功能。"
+        turn_limit = cfg.int("image.max_per_turn", 1, lo=1, hi=5)
+        state = state_of(event)
+        if state.photos >= turn_limit:
+            return f"这一轮已经拍过 {turn_limit} 张照片了。"
+        result = await self.image.take_photo(
+            bot_id=bot_id,
+            scene=scene,
+            umo=event.unified_msg_origin,
+            kind="photo_chat",
+        )
+        if result.get("ok"):
+            state.photos += 1
+        return str(result.get("message") or "没拍好。")
+
     @filter.llm_tool("memory_search")
     async def tool_memory_search(
         self, event: AstrMessageEvent, query: str, limit: int = 5
@@ -2636,12 +3188,41 @@ class Main(Star):
             query(string): 要查的关键词
             limit(number): 最多返回几条
         """
-        if self.facts is None:
+        if self.facts is None and self.story is None:
             return "想不起来了。"
-        rows = await self.facts.search(event.get_platform_id(), query, limit or 5)
-        if not rows:
+        bot_id = event.get_platform_id()
+        cap = max(1, min(20, int(limit or 5)))
+        fact_rows = await self.facts.search(bot_id, query, cap) if self.facts is not None else []
+        world_rows = (
+            await self.story.search_known_canon(bot_id, query, cap)
+            if self.story is not None
+            else []
+        )
+        if not fact_rows and not world_rows:
             return "没查到。"
-        return "\n".join(f"- {row['text']}" for row in rows)
+        if world_rows and fact_rows:
+            world_quota = min(len(world_rows), max(1, (cap + 1) // 2))
+            fact_quota = min(len(fact_rows), cap - world_quota)
+            rem = cap - world_quota - fact_quota
+            if rem > 0 and len(world_rows) > world_quota:
+                add = min(rem, len(world_rows) - world_quota)
+                world_quota += add
+                rem -= add
+            if rem > 0 and len(fact_rows) > fact_quota:
+                fact_quota += min(rem, len(fact_rows) - fact_quota)
+            chosen_world = world_rows[:world_quota]
+            chosen_facts = fact_rows[:fact_quota]
+        else:
+            chosen_world = world_rows[:cap]
+            chosen_facts = fact_rows[:cap]
+        lines: list[str] = []
+        for row in chosen_world:
+            label = CATEGORY_LABELS.get(str(row.get("category") or "other"), "其他")
+            lines.append(f"- [世界常识·{label}] {row['name']}：{row['body']}")
+        for row in chosen_facts:
+            prefix = "[记忆事实] " if chosen_world else ""
+            lines.append(f"- {prefix}{row['text']}")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------ 命令
     async def _admin_private(self, event: AstrMessageEvent) -> bool:
@@ -2815,10 +3396,17 @@ class Main(Star):
         bot_id = event.get_platform_id()
         parts = self._command_args(event, "story").split()
         action = parts[0].lower() if parts else "status"
-        usage = "用法：/story [status | on | off | pause | resume | wake | import <文件>]"
+        usage = "用法：/story [status | on | off | pause | resume | wake | classify | import <文件>]"
         try:
             if action == "status":
                 yield event.plain_result(self._format_story(await self.story.status(bot_id)))
+                return
+            if action == "classify":
+                result = await self.story.classify_world(bot_id)
+                yield event.plain_result(
+                    f"已重新提炼角色常识底稿（{len(result['known_outline'])} 字）并分类设定："
+                    f"角色已知 {result['known']} 条，仅 GM {result['gm_only']} 条。"
+                )
                 return
             if action == "import":
                 if len(parts) < 2:

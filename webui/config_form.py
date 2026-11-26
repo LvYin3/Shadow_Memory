@@ -34,6 +34,7 @@ GROUP_DEFS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("interaction", "互动", ("interaction", "memo")),
     ("story", "故事", ("story",)),
+    ("image", "生图", ("image",)),
     ("logging", "日志", ("logging",)),
 )
 
@@ -56,6 +57,10 @@ KNOBS = frozenset(
         "story.unread_keep",
         "story.npc_active_max",
         "story.npc_idle_days",
+        "image.daily_limit",
+        "image.max_retries",
+        "image.ref.max_pending_per_subject",
+        "image.ref.max_pending_total",
         "logging.retention_days",
     }
 )
@@ -99,6 +104,8 @@ OVERRIDE_PATHS = {
     "qzone_daily_limit": "interaction.qzone.daily_limit",
     "qzone_ugc_right": "interaction.qzone.ugc_right",
     "story_base_card": "story.base_card",
+    "image_enabled": "image.enabled",
+    "image_provider_id": "image.provider_id",
 }
 
 
@@ -314,6 +321,8 @@ def _split(fields: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dic
 
 
 def _field(path: str, spec: Mapping[str, Any]) -> dict[str, Any] | None:
+    if spec.get("invisible"):
+        return None
     widget = _widget(path, spec)
     if widget is None:
         return None

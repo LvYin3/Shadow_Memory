@@ -393,7 +393,45 @@
       "npc_idle_days": {"type": "int", "description": "配角多少天没出场就自动休眠", "hint": "只算已经提交、并且他真正单独出场过的场。", "default": 14},
       "spoiler_heavy": {"type": "bool", "description": "故事页显示主持人笔记和配角记忆", "hint": "默认关。完整转录、设定集和世界种子仍要在页面上确认后才展开。", "default": false},
       "narration": {"type": "string", "description": "背景模型写给她看的叙述用什么人称", "hint": "second：第二人称“你”；first：第一人称“我”，只写感知；none：不带人称，直接写现场。", "options": ["second", "first", "none"], "default": "first"},
-      "thinking": {"type": "string", "description": "背景模型什么时候开思考", "hint": "close：只在收场开（默认）。scene：先判断这场有没有没收尾的事，有就把整场开开。plan：同一次判断，有就先写一场约束，执行不开思考。off：全程不开。思考走写作模型的直连地址；没配 text.base_url 时会跳过并退回不开。", "options": ["off", "close", "scene", "plan"], "default": "close"}
+      "thinking": {"type": "string", "description": "背景模型什么时候开思考", "hint": "close：只在收场开（默认）。scene：先判断这场有没有没收尾的事，有就把整场开开。plan：同一次判断，有就先写一场约束，执行不开思考。off：全程不开。思考走写作模型的直连地址；没配 text.base_url 时会跳过并退回不开。", "options": ["off", "close", "scene", "plan"], "default": "close"},
+      "world_recall_limit": {"type": "int", "description": "聊天与演出每轮最多按需注入几条角色已知世界设定", "hint": "0 表示关闭按需设定注入（仍保留常驻底稿与 memory_search 工具查询）。", "default": 3, "slider": {"min": 0, "max": 10, "step": 1}},
+      "world_recall_threshold": {"type": "float", "description": "判断模型把世界设定判为当前相关所需的最低概率", "default": 0.55},
+      "world_recall_candidates": {"type": "int", "description": "按需检索世界设定时先粗筛出多少条候选交给判断模型", "default": 16, "slider": {"min": 1, "max": 60, "step": 1}}
+    }
+  },
+  "image": {
+    "type": "object",
+    "description": "生图模块：拍照工具、参考图与视觉审核（生图提供商档案在 WebUI「生图」页配置）",
+    "items": {
+      "enabled": {"type": "bool", "description": "启用生图与拍照功能", "default": false},
+      "provider_id": {"type": "string", "description": "默认生图提供商 ID（在 WebUI「生图」页维护提供商档案）", "default": ""},
+      "providers": {"type": "list", "description": "生图提供商档案列表（在插件 WebUI「生图」页维护，隐藏避免明文暴露密钥）", "default": [], "invisible": true},
+      "prompt_provider_id": {"type": "string", "description": "提示词转译模型提供商；留空时依次回退故事背景模型、写作模型", "default": "", "_special": "select_provider"},
+      "review_provider_id": {"type": "string", "description": "视觉审核模型提供商；留空时复用 vision 视觉模型配置", "default": "", "_special": "select_provider"},
+      "translate_ref_mode": {"type": "string", "description": "转译模型看参考图模式：off 纯文本 / style 仅画风图 / style_and_self 画风+角色本人图 / selected 两阶段看全部选中参考图", "hint": "仅当转译模型本身支持视觉时生效；纯文本模型会自动原地降级为纯文本转译。", "options": ["off", "style", "style_and_self", "selected"], "default": "style_and_self"},
+      "translate_max_refs": {"type": "int", "description": "单次喂给转译模型的参考图张数上限", "default": 6, "slider": {"min": 1, "max": 12, "step": 1}},
+      "review_enabled": {"type": "bool", "description": "启用生图后视觉审核（默认开，审核异常时阻断输出）", "default": true},
+      "review_include_refs": {"type": "bool", "description": "视觉审核时一并附带选中的主体参考图做一致性比对（会增加视觉 token）", "default": false},
+      "max_retries": {"type": "int", "description": "审核未通过时的最大重试次数", "default": 1, "slider": {"min": 0, "max": 3, "step": 1}},
+      "return_description": {"type": "bool", "description": "拍照完成后把审核模型的成图文字描述返回给主对话模型（默认关以节省 token）", "default": false},
+      "daily_limit": {"type": "int", "description": "每机器人每日生图总上限（含拍照与自动参考图）；0 表示不限制", "default": 20, "slider": {"min": 0, "max": 200, "step": 1}},
+      "max_per_turn": {"type": "int", "description": "聊天单轮最多拍照张数", "default": 1, "slider": {"min": 1, "max": 5, "step": 1}},
+      "story_max_per_scene": {"type": "int", "description": "故事单场最多主动拍照张数", "default": 1, "slider": {"min": 0, "max": 3, "step": 1}},
+      "max_style_refs": {"type": "int", "description": "每次生图固定附带的画风参考图上限", "default": 3, "slider": {"min": 1, "max": 8, "step": 1}},
+      "max_subject_refs": {"type": "int", "description": "每次生图最多选中的主体参考图张数（不含画风图）", "default": 4, "slider": {"min": 1, "max": 10, "step": 1}},
+      "max_self_refs": {"type": "int", "description": "角色本人（self）允许保留的生效参考图上限", "default": 3, "slider": {"min": 1, "max": 6, "step": 1}},
+      "temp_ttl_hours": {"type": "int", "description": "拍照临时句柄（photo:<id>）保留小时数", "default": 24, "slider": {"min": 1, "max": 168, "step": 1}},
+      "max_image_mb": {"type": "int", "description": "参考图与成图单张体积上限（MB）", "default": 8, "slider": {"min": 1, "max": 30, "step": 1}},
+      "ref": {
+        "type": "object",
+        "description": "参考图自动生成与人工审核区",
+        "items": {
+          "auto_generate": {"type": "bool", "description": "故事收场时自动为新出现事物生成参考图", "default": true},
+          "require_review": {"type": "bool", "description": "自动生成的参考图进入人工审核区，批准后才用于后续生图（默认开）", "default": true},
+          "max_pending_per_subject": {"type": "int", "description": "同一事物在审核区最多保留候选张数", "default": 3, "slider": {"min": 1, "max": 6, "step": 1}},
+          "max_pending_total": {"type": "int", "description": "审核区总参考图上限（满额后暂停自动生成）", "default": 15, "slider": {"min": 1, "max": 60, "step": 1}}
+        }
+      }
     }
   },
   "logging": {
@@ -406,7 +444,7 @@
   },
   "bot_overrides": {
     "type": "dict",
-    "description": "按机器人覆盖（键为 bot_id）。可覆盖：persona_mode / base_card / gate_enabled / gate_threshold / gate_question / theta_pre / theta_aux / tts_provider_id / environment_enabled / environment_prompt / qzone_daily_limit / qzone_ugc_right / story_base_card",
+    "description": "按机器人覆盖（键为 bot_id）。可覆盖：persona_mode / base_card / gate_enabled / gate_threshold / gate_question / theta_pre / theta_aux / tts_provider_id / environment_enabled / environment_prompt / qzone_daily_limit / qzone_ugc_right / story_base_card / image_enabled / image_provider_id",
     "default": {}
   }
 }

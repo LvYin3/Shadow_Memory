@@ -32,6 +32,9 @@ async def test_fresh_database_sets_schema_version(workdir):
         "story_unreads",
         "story_sends",
         "story_npcs",
+        "image_refs",
+        "image_temp",
+        "image_logs",
     } <= names
     await db.close()
 

@@ -63,6 +63,7 @@ class MediaService:
         now_fn: Callable[[], int] = clock_mod.now_ms,
         url_validator: Callable[[str], None] = ensure_public_url,
         captioner: Captioner | None = None,
+        photo_resolver: Callable[..., Any] | None = None,
     ) -> None:
         self.db = db
         self.configs = configs
@@ -72,6 +73,7 @@ class MediaService:
         self.now_fn = now_fn
         self.url_validator = url_validator
         self.captioner = captioner
+        self.photo_resolver = photo_resolver
 
     def media(self, bot_id: str) -> MediaDir:
         return self.dir_provider(bot_id)
@@ -106,6 +108,16 @@ class MediaService:
             sender_id = getattr(event, "get_sender_id", lambda: "")() or ""
             sender_name = getattr(event, "get_sender_name", lambda: "")() or ""
             source_umo = getattr(event, "unified_msg_origin", "") or ""
+        elif source_text.startswith("photo:"):
+            if self.photo_resolver is None:
+                return {"ok": False, "message": "现在还不能存刚拍的照片。"}
+            pid = source_text.split(":", 1)[1].strip()
+            try:
+                data = await self.photo_resolver(bot_id, pid)
+            except MediaError as exc:
+                return {"ok": False, "message": str(exc)}
+            kind, source_ref = "photo", source_text
+            source_umo = getattr(event, "unified_msg_origin", "") or ""
         elif source_text.startswith(("http://", "https://")):
             try:
                 data = await download_image(
@@ -120,7 +132,10 @@ class MediaService:
                 return {"ok": False, "message": str(exc)}
             kind, source_ref = "url", (urlparse(source_text).hostname or "")
         else:
-            return {"ok": False, "message": "我只能存当前消息里的图，或者一个 http(s) 链接。"}
+            return {
+                "ok": False,
+                "message": "我只能存当前消息里的图、刚拍的照片（photo:...），或者一个 http(s) 链接。",
+            }
 
         ext = sniff_image_ext(data)
         if ext is None:
@@ -214,6 +229,74 @@ class MediaService:
             "message": f"存好了：{saved['filename']}（{human_size(saved['size'])}）",
         }
 
+    async def save_raw(
+        self,
+        *,
+        bot_id: str,
+        data: bytes,
+        name: str = "",
+        description: str = "",
+        tags: Any = None,
+        source: str = "photo",
+        source_ref: str = "",
+    ) -> dict[str, Any]:
+        """直接把原始图片字节存入图片库（供故事场内拍照顺手存库使用）。"""
+        cfg = self.configs(bot_id)
+        if not cfg.bool("interaction.media.enabled", True):
+            return {"ok": False, "message": "现在不收图。"}
+        media = self.media(bot_id)
+        if sniff_image_ext(data) is None:
+            return {"ok": False, "message": "这不是一张我能存的图。"}
+        if len(data) > media.max_bytes:
+            return {"ok": False, "message": f"这张图太大了（上限 {human_size(media.max_bytes)}）。"}
+        max_files = cfg.int("interaction.media.max_files", 100, lo=1, hi=10000)
+        max_total = cfg.int("interaction.media.max_total_mb", 200, lo=1, hi=100000) * 1024 * 1024
+        stats = media.stats()
+        if stats["files"] >= max_files:
+            return {"ok": False, "message": f"文件夹满了（{max_files} 张），先删几张吧。"}
+        if stats["bytes"] + len(data) > max_total:
+            return {"ok": False, "message": f"文件夹满了（{human_size(max_total)}），先删几张吧。"}
+        limit = cfg.int("interaction.media.max_description_chars", 200, lo=10, hi=2000)
+        body = (description or "").strip()[:limit] or (name or "").strip() or "随手拍下的一张照片"
+        cleaned_tags = _clean_tags(tags)
+        try:
+            saved = media.save_bytes(data, prefix=name or "photo", now=self.now_fn())
+        except MediaError as exc:
+            return {"ok": False, "message": str(exc)}
+        try:
+            await self.db.execute(
+                "INSERT INTO media_items(bot_id, filename, description, tags, source, source_ref, "
+                "sender_id, sender_name, source_umo, size, created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    bot_id,
+                    saved["filename"],
+                    body,
+                    json.dumps(cleaned_tags, ensure_ascii=False),
+                    source,
+                    source_ref,
+                    "",
+                    "",
+                    "",
+                    saved["size"],
+                    self.now_fn(),
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            try:
+                media.delete(saved["filename"])
+            except MediaError:
+                pass
+            self.audit.warn("写图片元数据失败：%s", exc)
+            return {"ok": False, "message": "这张图没存下来。"}
+        await self._log(bot_id, "save", saved["filename"], saved["size"], source_ref or source, "ok", "")
+        return {
+            "ok": True,
+            "filename": saved["filename"],
+            "size": saved["size"],
+            "message": f"存好了：{saved['filename']}",
+        }
+
     # ------------------------------------------------------------------ 查询
     async def _rows(self, bot_id: str, limit: int = 300) -> list[dict[str, Any]]:
         return await self.db.fetchall(
@@ -303,6 +386,11 @@ class MediaService:
             except (ValueError, IndexError) as exc:
                 raise MediaError("event 引用要写成 event:1 这样。") from exc
             data = await media.read_event_image(event, index)
+        elif text.startswith("photo:"):
+            if self.photo_resolver is None:
+                raise MediaError("现在还不能发刚拍的照片。")
+            pid = text.split(":", 1)[1].strip()
+            data = await self.photo_resolver(bot_id, pid)
         elif text.startswith(("http://", "https://")):
             try:
                 data = await download_image(

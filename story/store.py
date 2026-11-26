@@ -22,6 +22,7 @@ _STATE_COLUMNS = {
     "failures",
     "world_title",
     "outline",
+    "known_outline",
     "seed_meta",
     "tree",
     "share_tokens",
@@ -116,16 +117,26 @@ class StoryStore:
                 stamp,
                 world_title=str(seed.get("title") or ""),
                 outline=str(seed.get("outline") or ""),
+                known_outline=str(seed.get("known_outline") or ""),
                 seed_meta=_dumps(meta),
             )
             await self.db.execute(
                 "DELETE FROM story_canon WHERE bot_id=? AND origin='seed'", (bot_id,)
             )
             for entry in entries:
+                visibility = entry.get("visibility") or "gm_only"
                 await self.db.execute(
-                    "INSERT INTO story_canon(bot_id, origin, category, name, body, scene_id, "
-                    "created_at) VALUES(?,?,?,?,?,NULL,?)",
-                    (bot_id, "seed", entry["category"], entry["name"], entry["body"], stamp),
+                    "INSERT INTO story_canon(bot_id, origin, category, name, body, visibility, "
+                    "scene_id, created_at) VALUES(?,?,?,?,?,?,NULL,?)",
+                    (
+                        bot_id,
+                        "seed",
+                        entry["category"],
+                        entry["name"],
+                        entry["body"],
+                        visibility,
+                        stamp,
+                    ),
                 )
         return {"entries": len(entries), "hooks": len(meta["hooks"])}
 
@@ -133,10 +144,67 @@ class StoryStore:
     async def canon(self, bot_id: str) -> list[dict[str, Any]]:
         """种子条目在前，演出中新增的在后，各按登记顺序。"""
         return await self.db.fetchall(
-            "SELECT id, origin, category, name, body, scene_id, created_at FROM story_canon "
-            "WHERE bot_id=? ORDER BY CASE origin WHEN 'seed' THEN 0 ELSE 1 END, id",
+            "SELECT id, origin, category, name, body, visibility, scene_id, created_at "
+            "FROM story_canon WHERE bot_id=? "
+            "ORDER BY CASE origin WHEN 'seed' THEN 0 ELSE 1 END, id",
             (bot_id,),
         )
+
+    async def known_canon(self, bot_id: str) -> list[dict[str, Any]]:
+        """仅返回角色可见（visibility='known'）的设定条目。"""
+        return await self.db.fetchall(
+            "SELECT id, origin, category, name, body, visibility, scene_id, created_at "
+            "FROM story_canon WHERE bot_id=? AND visibility='known' "
+            "ORDER BY CASE origin WHEN 'seed' THEN 0 ELSE 1 END, id",
+            (bot_id,),
+        )
+
+    async def set_canon_visibility(
+        self, bot_id: str, canon_id: int, visibility: str
+    ) -> bool:
+        if visibility not in {"known", "gm_only"}:
+            raise ValueError(f"invalid visibility: {visibility}")
+        row = await self.db.fetchone(
+            "SELECT id FROM story_canon WHERE id=? AND bot_id=?",
+            (int(canon_id), bot_id),
+        )
+        if row is None:
+            return False
+        await self.db.execute(
+            "UPDATE story_canon SET visibility=? WHERE id=? AND bot_id=?",
+            (visibility, int(canon_id), bot_id),
+        )
+        return True
+
+    async def update_canon_visibilities(
+        self,
+        bot_id: str,
+        by_name: dict[str, str],
+        *,
+        origin: str | None = None,
+    ) -> int:
+        updated = 0
+        for name, visibility in by_name.items():
+            if visibility not in {"known", "gm_only"}:
+                continue
+            if origin:
+                await self.db.execute(
+                    "UPDATE story_canon SET visibility=? "
+                    "WHERE bot_id=? AND origin=? AND name=?",
+                    (visibility, bot_id, origin, name),
+                )
+            else:
+                await self.db.execute(
+                    "UPDATE story_canon SET visibility=? WHERE bot_id=? AND name=?",
+                    (visibility, bot_id, name),
+                )
+            updated += 1
+        return updated
+
+    async def update_known_outline(
+        self, bot_id: str, text: str, now: int | None = None
+    ) -> None:
+        await self.update_state(bot_id, now, known_outline=str(text or "").strip())
 
     async def canon_counts(self, bot_id: str) -> dict[str, int]:
         rows = await self.db.fetchall(
@@ -160,10 +228,20 @@ class StoryStore:
             )
             if exists:
                 continue
+            visibility = item.get("visibility") if item.get("visibility") in {"known", "gm_only"} else "gm_only"
             await self.db.execute(
-                "INSERT INTO story_canon(bot_id, origin, category, name, body, scene_id, "
-                "created_at) VALUES(?,?,?,?,?,?,?)",
-                (bot_id, "play", item["category"], item["name"], item["body"], scene_id, now),
+                "INSERT INTO story_canon(bot_id, origin, category, name, body, visibility, "
+                "scene_id, created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    bot_id,
+                    "play",
+                    item["category"],
+                    item["name"],
+                    item["body"],
+                    visibility,
+                    scene_id,
+                    now,
+                ),
             )
             added += 1
         return added
@@ -571,15 +649,21 @@ class StoryStore:
         state = await self.state(bot_id) or {}
         meta = self.seed_meta(state)
         entries = await self.db.fetchall(
-            "SELECT category, name, body FROM story_canon "
+            "SELECT category, name, body, visibility FROM story_canon "
             "WHERE bot_id=? AND origin='seed' ORDER BY id",
             (bot_id,),
         )
         return {
             "title": state.get("world_title") or "",
             "outline": state.get("outline") or "",
+            "known_outline": state.get("known_outline") or "",
             "entries": [
-                {"category": row["category"], "name": row["name"], "body": row["body"]}
+                {
+                    "category": row["category"],
+                    "name": row["name"],
+                    "body": row["body"],
+                    "visibility": row.get("visibility") or "gm_only",
+                }
                 for row in entries
             ],
             "hooks": list(meta.get("hooks") or []),

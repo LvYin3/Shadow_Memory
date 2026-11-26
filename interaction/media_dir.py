@@ -218,7 +218,13 @@ class MediaDir:
             raise MediaError(f"这张图太大了（上限 {human_size(self.max_bytes)}）。")
         return data
 
-    async def resolve(self, items: Iterable[Any] | None, event: Any = None) -> list[str]:
+    async def resolve(
+        self,
+        items: Iterable[Any] | None,
+        event: Any = None,
+        *,
+        photo_resolver: Any = None,
+    ) -> list[str]:
         """把发说说用的图片引用解析成 file:// / http(s) / base64://。"""
         refs: list[str] = []
         values = list(items or [])
@@ -230,6 +236,15 @@ class MediaDir:
                 continue
             if text.startswith(("http://", "https://")):
                 refs.append(text)
+                continue
+            if text.startswith("photo:"):
+                if photo_resolver is None:
+                    raise MediaError("现在还不能引用刚拍的照片。")
+                pid = text.split(":", 1)[1].strip()
+                data = await photo_resolver(self.bot_id, pid)
+                if len(data) > self.max_bytes:
+                    raise MediaError(f"这张图太大了（上限 {human_size(self.max_bytes)}）。")
+                refs.append(f"base64://{base64.b64encode(data).decode('ascii')}")
                 continue
             if text.startswith("event:"):
                 try:

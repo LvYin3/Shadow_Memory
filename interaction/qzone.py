@@ -25,12 +25,14 @@ class QzoneService:
         media_provider: MediaProvider,
         audit: Audit,
         now_fn: Callable[[], int] = clock_mod.now_ms,
+        photo_resolver: Callable[..., Any] | None = None,
     ) -> None:
         self.db = db
         self.configs = configs
         self.media_provider = media_provider
         self.audit = audit
         self.now_fn = now_fn
+        self.photo_resolver = photo_resolver
 
     # ------------------------------------------------------------------ 可用性
     @staticmethod
@@ -63,6 +65,33 @@ class QzoneService:
         if not self.event_supported(event):
             await self._log(bot_id, "aiocqhttp?", 0, 0, ugc_right, None, "unsupported", "platform")
             return {"ok": False, "message": "这个平台发不了说说。"}
+        return await self.post_via_bot(
+            getattr(event, "bot", None),
+            bot_id=bot_id,
+            text=text,
+            images=images,
+            ugc_right=ugc_right,
+            bypass_limit=bypass_limit,
+            event=event,
+        )
+
+    async def post_via_bot(
+        self,
+        bot: Any,
+        *,
+        bot_id: str,
+        text: str,
+        images: list[Any] | None = None,
+        ugc_right: int | None = None,
+        bypass_limit: bool = False,
+        event: Any = None,
+    ) -> dict[str, Any]:
+        cfg = self.configs(bot_id)
+        if not cfg.bool("interaction.qzone.enabled", True):
+            return {"ok": False, "message": "现在不玩空间。"}
+        if bot is None or not hasattr(bot, "call_action"):
+            await self._log(bot_id, "aiocqhttp?", 0, 0, ugc_right, None, "unsupported", "bot")
+            return {"ok": False, "message": "这个平台发不了说说。"}
 
         body = (text or "").strip()
         if not body and not images:
@@ -86,7 +115,9 @@ class QzoneService:
 
         media = self.media(bot_id)
         try:
-            refs = await media.resolve(images or [], event)
+            refs = await media.resolve(
+                images or [], event, photo_resolver=self.photo_resolver
+            )
         except MediaError as exc:
             await self._log(bot_id, "aiocqhttp", len(body), 0, visibility, None, "bad_image", str(exc))
             return {"ok": False, "message": str(exc)}
@@ -97,7 +128,6 @@ class QzoneService:
             payload["images"] = refs
         if visibility != 1:
             payload["ugc_right"] = visibility
-        bot = getattr(event, "bot", None)
         try:
             response = await bot.call_action(action, **payload)
         except Exception as exc:  # noqa: BLE001 - 后端不支持/网络错误
