@@ -1495,6 +1495,10 @@ class Main(Star):
             self.audit.debug("persona_inject_error", bot_id=event.get_platform_id(), error=str(exc))
         try:
             self._append_system(req, life)
+            event.set_extra(
+                "shadow_memory_system_chars",
+                len(getattr(req, "system_prompt", "") or ""),
+            )
             if rules or life:
                 chat_type, _, _ = self._chat_scene(event)
                 self.audit.debug(
@@ -1756,9 +1760,10 @@ class Main(Star):
             world_sys = await self._world_system_block(bot_id)
             if world_sys and world_sys not in (getattr(req, "system_prompt", "") or ""):
                 self._append_system(req, world_sys)
+            world_hits: list[str] = []
             query = (event.message_str or "").strip() or str(getattr(req, "prompt", "") or "").strip()
             if query:
-                world_turn, _ = await self._world_turn_block(
+                world_turn, world_recall = await self._world_turn_block(
                     bot_id, query, self._context_texts(req), decision_context
                 )
                 if world_turn:
@@ -1767,6 +1772,13 @@ class Main(Star):
                         extra_parts = []
                         req.extra_user_content_parts = extra_parts
                     extra_parts.append(TextPart(text="\n\n" + world_turn).mark_as_temp())
+                    world_hits = [
+                        str(item.get("name") or "")
+                        for item in (getattr(world_recall, "entries", []) or [])
+                        if str(item.get("name") or "")
+                    ]
+            event.set_extra("shadow_memory_world_brief_chars", len(world_sys))
+            event.set_extra("shadow_memory_world_canon_hits", world_hits)
             return
         query = (event.message_str or "").strip() or str(getattr(req, "prompt", "") or "").strip()
         if not query:
@@ -1774,6 +1786,8 @@ class Main(Star):
             world_sys = await self._world_system_block(bot_id)
             if world_sys and world_sys not in (getattr(req, "system_prompt", "") or ""):
                 self._append_system(req, world_sys)
+            event.set_extra("shadow_memory_world_brief_chars", len(world_sys))
+            event.set_extra("shadow_memory_world_canon_hits", [])
             return
         veto = await self._recall_veto(bot_id, umo, query)
         recent = self._context_texts(req)
@@ -1883,26 +1897,39 @@ class Main(Star):
             self.audit.debug(
                 "recall_inject",
                 bot_id=bot_id,
-                kind=kind,
+                recall_kind=kind,
                 parts=len(prepared.parts),
                 chars=len(recall_block),
                 labels=["我知道"] if kind == "fact" else ["我脑子里浮起", "心里还有一点余波"],
             )
         else:
             self.audit.debug("recall_inject_skip", bot_id=bot_id, reason="no_parts")
+        world_hits: list[str] = []
         if world_turn:
             extra_parts = getattr(req, "extra_user_content_parts", None)
             if not isinstance(extra_parts, list):
                 extra_parts = []
                 req.extra_user_content_parts = extra_parts
             extra_parts.append(TextPart(text="\n\n" + world_turn).mark_as_temp())
+            world_hits = [
+                str(item.get("name") or "")
+                for item in (getattr(world_recall, "entries", []) or [])
+                if str(item.get("name") or "")
+            ]
             self.audit.debug(
                 "world_canon_inject",
                 bot_id=bot_id,
-                count=len(getattr(world_recall, "entries", []) or []),
+                count=len(world_hits),
+                hits=world_hits,
                 reason=getattr(world_recall, "reason", ""),
                 chars=len(world_turn),
             )
+        event.set_extra("shadow_memory_world_brief_chars", len(world_sys))
+        event.set_extra("shadow_memory_world_canon_hits", world_hits)
+        event.set_extra(
+            "shadow_memory_system_chars",
+            len(getattr(req, "system_prompt", "") or ""),
+        )
         self.audit.debug(
             "persona_inject_done",
             bot_id=bot_id,
@@ -1977,6 +2004,9 @@ class Main(Star):
                 bot_id=event.get_platform_id(),
                 tools=tools,
                 text_chars=len(text),
+                system_chars=event.get_extra("shadow_memory_system_chars"),
+                world_brief_chars=event.get_extra("shadow_memory_world_brief_chars"),
+                world_canon_hits=event.get_extra("shadow_memory_world_canon_hits"),
             )
         except Exception as exc:  # noqa: BLE001
             self.audit.warn("记录 LLM 工具调用失败：%s", exc)

@@ -638,3 +638,57 @@ async def test_main_chat_world_knowledge_injection_memory_search_and_routes(plug
         assert classified["known_outline"] == "重新提炼的第一人称底稿。"
     finally:
         await plugin.terminate()
+
+
+async def test_recall_hit_does_not_abort_world_canon_injection(plugin_main, caplog):
+    """复现线上日志 bug：记忆事实/情景召回与世界常识同一轮同时命中时，绝不能因 Audit.debug 崩溃而跳过 world_turn。"""
+    plugin, _ = await make_plugin(
+        plugin_main, {"story": {"enabled": True, "base_card": "她叫白映风。"}}
+    )
+    try:
+        bot_id = private_event("").get_platform_id()
+        await plugin.story.import_seed(
+            bot_id,
+            {
+                "version": "world_seed/v1",
+                "title": "离光之外",
+                "outline": "这是一个日常水面下流淌着时能的和平世界，白映风驻守青溪县小院作为繁星巡查员。" * 2,
+                "known_outline": "我知道这个世界存在时能。",
+                "entries": [
+                    {
+                        "category": "其他",
+                        "name": "时能与宇宙流速",
+                        "body": "三维空间之外时间流动蕴含的能量称为时能。",
+                        "visibility": "known",
+                    }
+                ],
+            },
+        )
+        await plugin.story.enable(bot_id)
+        # 写入一条会在同一问句命中的事实，强制触发 recall_block 分支
+        await plugin.facts.add_manual(bot_id, "对方之前问过我关于时能的话题", kind="world")
+
+        event = private_event("你知道时能嘛")
+        req = SimpleNamespace(
+            system_prompt="基础人设",
+            contexts=[],
+            extra_user_content_parts=[],
+            prompt="你知道时能嘛",
+        )
+        with caplog.at_level(logging.WARNING):
+            await plugin.on_llm_request(event, req)
+
+        warnings = "\n".join(record.getMessage() for record in caplog.records)
+        assert "注入失败" not in warnings
+        assert "multiple values for argument 'kind'" not in warnings
+
+        temp_texts = "\n".join(part.text for part in req.extra_user_content_parts)
+        assert "对方之前问过我关于时能的话题" in temp_texts
+        assert "【我知道的世界常识" in temp_texts
+        assert "三维空间之外时间流动蕴含的能量称为时能" in temp_texts
+        assert event.get_extra("shadow_memory_pending") is not None
+        assert event.get_extra("shadow_memory_world_brief_chars") > 0
+        assert event.get_extra("shadow_memory_world_canon_hits") == ["时能与宇宙流速"]
+        assert event.get_extra("shadow_memory_system_chars") == len(req.system_prompt)
+    finally:
+        await plugin.terminate()

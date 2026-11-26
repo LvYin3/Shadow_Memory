@@ -24,7 +24,7 @@ class Audit:
         """运行时切换 DEBUG 诊断日志；普通 event 仍按 INFO 输出。"""
         self._debug = bool(enabled)
 
-    def event(self, kind: str, **fields: Any) -> None:
+    def event(self, kind: str, /, **fields: Any) -> None:
         payload = {key: value for key, value in fields.items() if value is not None}
         try:
             line = json.dumps(payload, ensure_ascii=False, default=str)
@@ -32,7 +32,7 @@ class Audit:
             line = str(payload)
         self._logger.info("[mem] %s %s", kind, line)
 
-    def debug(self, kind: str, **fields: Any) -> None:
+    def debug(self, kind: str, /, **fields: Any) -> None:
         """只有配置开关打开时才输出 DEBUG 诊断。"""
         if not self._debug:
             return

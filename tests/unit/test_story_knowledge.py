@@ -220,3 +220,18 @@ async def test_carry_preserves_known_outline_and_visibility(db, make_configs):
     assert vis2["冥蛇族与能力封印"] == "gm_only"
     assert render_world_brief("", []) == ""
     assert format_world_turn_block([]) == ""
+
+
+def test_audit_accepts_kind_keyword_argument(caplog):
+    import logging
+
+    from astrbot_plugin_shadow_memory.core.audit import Audit
+
+    logger = logging.getLogger("test-audit-kind")
+    audit = Audit(logger, debug=True)
+    with caplog.at_level(logging.DEBUG, logger="test-audit-kind"):
+        audit.debug("recall_inject", bot_id=BOT, kind="fact", parts=1)
+        audit.event("custom_event", bot_id=BOT, kind="world")
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert "recall_inject" in messages and '"kind": "fact"' in messages
+    assert "custom_event" in messages and '"kind": "world"' in messages
