@@ -53,6 +53,7 @@ class PhotoOutput:
     retries: int
     review_status: str
     latency_ms: int
+    camera_note: str = ""
 
 
 @dataclass(slots=True)
@@ -401,6 +402,7 @@ class PhotoPipeline:
             )
         gen_prompt = str(plan["prompt"]).strip()
         aspect_ratio = str(plan.get("aspect_ratio") or "").strip()
+        camera_note = str(plan.get("camera_note") or "").strip()[:200]
         if locked_ref_ids is not None:
             selected_ids: list[Any] = list(locked_ref_ids)
         else:
@@ -410,6 +412,7 @@ class PhotoPipeline:
             "used_vision": used_vision,
             "ref_count": sent_ref_count,
             "fallback_reason": fallback_reason,
+            "camera_note": camera_note,
         }
         return gen_prompt, aspect_ratio, selected_ids, meta
 
@@ -452,7 +455,7 @@ class PhotoPipeline:
                     "今天的拍照额度用完了。", code="quota", retries=retries
                 )
 
-            gen_prompt, aspect_ratio, selected_ids, _ = await self._translate_photo(
+            gen_prompt, aspect_ratio, selected_ids, translate_meta = await self._translate_photo(
                 bot_id=bot_id,
                 umo=umo,
                 scene_request=scene_request,
@@ -463,6 +466,7 @@ class PhotoPipeline:
                 retry_feedback=retry_feedback,
                 retries=retries,
             )
+            camera_note = str(translate_meta.get("camera_note") or "").strip()
 
             style_loaded, subject_refs = await self.refs.load_for_generation(
                 bot_id, selected_ids
@@ -488,6 +492,7 @@ class PhotoPipeline:
                     retries=retries,
                     review_status="skipped",
                     latency_ms=int((time.monotonic() - started) * 1000),
+                    camera_note=camera_note,
                 )
 
             review_images: list[tuple[bytes, str]] = [(generated.data, generated.mime)]
@@ -507,6 +512,7 @@ class PhotoPipeline:
                 prompt=gen_prompt,
                 subjects=subjects_desc,
                 attached_ref_count=attached_refs,
+                camera_note=camera_note,
             )
             verdict = await self._review_vision(
                 bot_id, umo, review_images, img_prompts.REVIEW_SYSTEM, review_user
@@ -528,6 +534,7 @@ class PhotoPipeline:
                     retries=retries,
                     review_status="passed",
                     latency_ms=int((time.monotonic() - started) * 1000),
+                    camera_note=camera_note,
                 )
 
             last_reason = str(verdict.get("reason") or "画面与预期不符").strip()
@@ -543,6 +550,7 @@ class PhotoPipeline:
                     bot_id=bot_id,
                     attempt=attempt + 1,
                     reason=last_reason[:120],
+                    camera_note=camera_note or None,
                 )
                 continue
             raise PipelineError(
@@ -620,6 +628,7 @@ class PhotoPipeline:
                 prompt=gen_prompt,
                 subjects=subjects_desc,
                 attached_ref_count=attached_refs,
+                camera_note=str(translate_meta.get("camera_note") or "").strip(),
             )
             verdict = await self._review_vision(
                 bot_id, "", review_images, img_prompts.REVIEW_SYSTEM, review_user

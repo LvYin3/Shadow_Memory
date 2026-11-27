@@ -348,8 +348,14 @@ def test_prompts_enforce_style_ref_and_drop_realism_bias():
     assert "不要**描写她手里举着手机对着自己" in img_prompts.TRANSLATE_SYSTEM
     assert "轮廓边缘与笔触类型" in img_prompts.TRANSLATE_SYSTEM
     assert "随季换装" in img_prompts.TRANSLATE_SYSTEM
+    assert "拍照机位纠偏权" in img_prompts.TRANSLATE_SYSTEM
+    assert "奇幻/科幻设定例外" in img_prompts.TRANSLATE_SYSTEM
+    assert "camera_note" in img_prompts.TRANSLATE_SYSTEM
     assert "画风规则" in img_prompts.AUTO_REF_SYSTEM
     assert "二次元" in img_prompts.REVIEW_SYSTEM
+    assert "机位纠偏对齐" in img_prompts.REVIEW_SYSTEM
+    assert "非设定意外悬浮" in img_prompts.REVIEW_SYSTEM
+    assert "奇幻/科幻元素" in img_prompts.REVIEW_SYSTEM
 
     user_with_vision = img_prompts.build_translate_user(
         scene_request="喝咖啡自拍",
@@ -448,6 +454,7 @@ async def test_multimodal_translate_modes_fallback_and_auto_ref(db, workdir, mak
         "used_vision": True,
         "ref_count": 2,
         "fallback_reason": "",
+        "camera_note": "",
     }
     assert vision_calls[-1]["count"] == 2
     assert "画风参考图「二次元画风」" in vision_calls[-1]["user"]
@@ -491,6 +498,7 @@ async def test_multimodal_translate_modes_fallback_and_auto_ref(db, workdir, mak
         "used_vision": False,
         "ref_count": 0,
         "fallback_reason": "",
+        "camera_note": "",
     }
     assert "清透赛璐璐" in text_calls[-1]["user"]
 
@@ -508,6 +516,61 @@ async def test_multimodal_translate_modes_fallback_and_auto_ref(db, workdir, mak
     assert "不支持视觉" in res_fb["translate_meta"]["fallback_reason"]
     assert "本次附带给你查看的参考图" not in text_calls[-1]["user"]
     assert "清透赛璐璐" in text_calls[-1]["user"]
+
+
+async def test_camera_note_propagates_to_visual_reviewer(db, workdir, make_configs):
+    audit = Audit(logging.getLogger("test"))
+    configs = make_configs(
+        {
+            "image": {
+                "enabled": True,
+                "provider_id": "p1",
+                "providers": [_provider_cfg()],
+                "review_enabled": True,
+                "translate_ref_mode": "off",
+            }
+        }
+    )
+    refs = RefStore(db, configs, workdir)
+    temp = PhotoTempStore(db, configs, workdir)
+    client = FakeClient()
+    review_users: list[str] = []
+
+    async def prompt_text(bot_id, umo, system, user):
+        return json.dumps(
+            {
+                "prompt": "close-up selfie POV in courtyard, pulling up hoodie collar slightly over chin",
+                "ref_ids": [],
+                "aspect_ratio": "3:4",
+                "camera_note": "普通前置自拍无镜子，已将“手机挡下半张脸”纠偏为拉起连帽衫衣领半遮下巴。",
+            },
+            ensure_ascii=False,
+        )
+
+    async def review_vision(bot_id, umo, images, system, user):
+        review_users.append(user)
+        return {"pass": True, "reason": "ok", "fix_hint": "", "description": "庭院自拍"}
+
+    pipeline = PhotoPipeline(
+        db=db,
+        configs=configs,
+        refs=refs,
+        client=client,
+        prompt_text=prompt_text,
+        review_vision=review_vision,
+        audit=audit,
+    )
+    svc = ImageService(
+        db=db, configs=configs, refs=refs, temp=temp, client=client, pipeline=pipeline, audit=audit
+    )
+    res = await svc.take_photo(
+        bot_id="bot1",
+        scene="坐在院子里，手机举到面前微微挡住下半张脸，只露出一双眼睛",
+    )
+    assert res["ok"] is True
+    assert len(review_users) == 1
+    assert "拍照机位纠偏说明" in review_users[0]
+    assert "拉起连帽衫衣领半遮下巴" in review_users[0]
 
 
 async def _coro(value):

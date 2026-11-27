@@ -163,6 +163,7 @@ class ImageService:
                 refs=out.ref_count,
                 retries=out.retries,
                 latency_ms=out.latency_ms,
+                camera_note=out.camera_note or None,
             )
             return_desc = cfg.bool("image.return_description", False)
             msg = f"拍好了：{staged['handle']}（可直接用 send_image / qzone / media(save) 引用）"

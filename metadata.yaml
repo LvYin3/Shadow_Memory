@@ -1,7 +1,7 @@
 name: shadow_memory
 desc: 影忆 ShadowMemory —— 给 AstrBot 角色一套会成长的人格记忆，支持聊天外按现实时间过日常与世界常识同步、群聊门控、分段语音回复、随手拍照与参考图审核、笔记备忘录、QQ 空间及可视化 WebUI。
 author: LvYin3
-version: 1.2.1
+version: 1.2.2
 display_name: 影忆
 short_desc: 影忆：会成长的人格记忆、角色日常故事、随手拍照与拟人聊天
 astrbot_version: ">=4.29.3"
